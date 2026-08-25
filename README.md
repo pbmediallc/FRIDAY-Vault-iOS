@@ -6,8 +6,8 @@
 > [`Docs/FRIDAY_VAULT_UPSTREAM.md`](Docs/FRIDAY_VAULT_UPSTREAM.md).
 >
 > Complete corresponding source for the distributed F.R.I.D.A.Y. Vault
-> `1.0.1 (2026081901)` build is recorded at
-> [`v1.0.1-2026081901`](https://github.com/pbmediallc/FRIDAY-Vault-iOS/tree/v1.0.1-2026081901).
+> `1.0.1 (2026082501)` build is recorded at
+> [`v1.0.1-2026082501`](https://github.com/pbmediallc/FRIDAY-Vault-iOS/tree/v1.0.1-2026082501).
 > This exact tag must resolve publicly before the build is distributed.
 
 <p align="center">

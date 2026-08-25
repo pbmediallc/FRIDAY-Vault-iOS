@@ -16,9 +16,9 @@ final class AboutProcessor: StateProcessor<AboutState, AboutAction, AboutEffect>
         & HasFlightRecorder
         & HasPasteboardService
 
-    /// The complete corresponding source for F.R.I.D.A.Y. Vault 1.0.1 (2026081901).
+    /// The complete corresponding source for F.R.I.D.A.Y. Vault 1.0.1 (2026082501).
     private static let fridaySourceURL = URL(
-        string: "https://github.com/pbmediallc/FRIDAY-Vault-iOS/tree/v1.0.1-2026081901",
+        string: "https://github.com/pbmediallc/FRIDAY-Vault-iOS/tree/v1.0.1-2026082501",
     )
 
     /// The verified Bitwarden iOS upstream repository. Its root exposes the GPLv3 license.

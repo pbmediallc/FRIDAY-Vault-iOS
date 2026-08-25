@@ -37,22 +37,15 @@ Create or verify these resources outside this script:
 Changing a capability invalidates existing profiles. Configure both IDs and
 their App Group assignments before generating the final profiles.
 
-## Current external blockers (read-only snapshot, 2026-08-19)
+## Resolved Apple resources (verified 2026-08-25)
 
-The App Store Connect API returned no registered Bundle ID for either F.R.I.D.A.Y.
-identifier and no app record for the main identifier. Consequently, matching
-profiles cannot exist yet. The API did return two unexpired PB Media Apple
-Distribution certificate records, expiring 2027-07-31 and 2027-08-13.
-
-The standalone App Group registry is not exposed by the App Store Connect REST
-API. Its object therefore still needs portal verification; regardless of
-whether it already exists, its assignment to the two currently absent App IDs
-is missing.
-
-The custom signing keychain is not currently in the user keychain search list,
-and no identity can be read from it while it is unavailable. The release script
-will report this and stop. It intentionally never unlocks or changes a
-keychain.
+- Both explicit App IDs exist with the required App Group and AutoFill
+  capabilities. The main App ID also has NFC Tag Reading.
+- Both App Store provisioning profiles exist and are installed locally.
+- App Store Connect app `6805077297` exists for the main bundle ID.
+- The dedicated build keychain contains the valid PB Media Apple Distribution
+  identity. The release script still intentionally never unlocks or changes a
+  keychain.
 
 The repository requires Xcode 26.5, while the inspected machine currently has
 Xcode 26.6 selected. Use Xcode 26.5 for the reproducible release, or set
@@ -60,16 +53,17 @@ Xcode 26.6 selected. Use Xcode 26.5 for the reproducible release, or set
 
 ## Non-signing gates
 
-- `ITSAppUsesNonExemptEncryption` is `true` in the app and extension. Obtain a
-  PB Media export-compliance determination and, if Apple issues one, record the
-  F.R.I.D.A.Y.-specific compliance code. Do not reuse Bitwarden's code.
-- Before distributing build `1.0.1 (2026081901)`, publish its complete
+- The two shipped Info.plists intentionally omit both Apple export-compliance
+  keys. App Store Connect must therefore present its official questionnaire
+  for this build. The release owner must answer the legal exemption and France
+  distribution questions; do not reuse Bitwarden's compliance code.
+- Before distributing build `1.0.1 (2026082501)`, publish its complete
   corresponding source and verify without authentication that the immutable
   tag URL resolves:
-  <https://github.com/pbmediallc/FRIDAY-Vault-iOS/tree/v1.0.1-2026081901>.
+  <https://github.com/pbmediallc/FRIDAY-Vault-iOS/tree/v1.0.1-2026082501>.
   A local Git remote or the Bitwarden upstream repository is not corresponding
   source for the F.R.I.D.A.Y. modifications.
-- The absent app record also means App Store/TestFlight metadata is not ready:
+- App Store/TestFlight metadata is not complete yet:
   privacy policy and support URLs, App Privacy answers, age rating, review and
   beta contact information, descriptions, screenshots, and tester groups must
   be completed in App Store Connect as applicable.
@@ -124,7 +118,7 @@ Scripts/pbmedia_release.sh signing-check
 Scripts/pbmedia_release.sh archive
 Scripts/pbmedia_release.sh export
 Scripts/pbmedia_release.sh verify-ipa \
-  build/pbmedia-release/FRIDAY-Vault-1.0.1-2026081901-export/Bitwarden.ipa
+  build/pbmedia-release/FRIDAY-Vault-1.0.1-2026082501-export/FRIDAYVault.ipa
 ```
 
 The default outputs are versioned beneath `build/pbmedia-release/`; existing
@@ -137,17 +131,19 @@ entitlement, and all signatures. Keep the archive for symbolication and perform
 any additional product-specific inspection before upload.
 
 Upload is intentionally separate and guarded by the current build number. For
-build `2026081901`, the command is:
+build `2026082501`, the command is:
 
 ```bash
-PBMEDIA_CONFIRM_UPLOAD=UPLOAD-2026081901 \
+PBMEDIA_CONFIRM_UPLOAD=UPLOAD-2026082501 \
   Scripts/pbmedia_release.sh upload \
-  build/pbmedia-release/FRIDAY-Vault-1.0.1-2026081901-export/Bitwarden.ipa
+  build/pbmedia-release/FRIDAY-Vault-1.0.1-2026082501-export/FRIDAYVault.ipa
 ```
 
 Do not run the upload command until the App Store Connect app record exists,
-the exported IPA has passed inspection, export compliance and GPL source
-delivery are resolved, and the release owner has explicitly approved that
-specific build. A successful upload is only delivery to Apple; processing,
-TestFlight assignment, installation, device testing, and acceptance remain
-separate gates.
+the exported IPA has passed inspection, the GPL source tag is public, the
+legal export-compliance answers are prepared, and the release owner has
+explicitly approved that specific build. Complete App Store Connect's
+post-upload compliance questionnaire before TestFlight assignment. A
+successful upload is only delivery to Apple; processing, TestFlight
+assignment, installation, device testing, and acceptance remain separate
+gates.

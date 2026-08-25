@@ -98,6 +98,14 @@ release_require_plist_value() {
         || release_die "${release_file}:${release_key_path} is '${release_actual_value}', expected '${release_expected_value}'"
 }
 
+release_require_plist_key_absent() {
+    local release_file="$1"
+    local release_key_path="$2"
+    if release_plist_value "${release_file}" "${release_key_path}" >/dev/null 2>&1; then
+        release_die "unexpected plist key ${release_key_path} in ${release_file}"
+    fi
+}
+
 release_config_check() {
     local release_main_entitlements="${release_repo_root}/Bitwarden/Application/Support/Bitwarden.entitlements"
     local release_autofill_entitlements="${release_repo_root}/BitwardenAutoFillExtension/Application/Support/BitwardenAutoFill.entitlements"
@@ -139,8 +147,10 @@ release_config_check() {
         "keychain-access-groups:0" '$(AppIdentifierPrefix)$(BASE_BUNDLE_ID)'
     release_require_plist_value "${release_autofill_entitlements}" \
         "keychain-access-groups:0" '$(AppIdentifierPrefix)$(BASE_BUNDLE_ID)'
-    release_require_plist_value "${release_main_info}" "ITSAppUsesNonExemptEncryption" "true"
-    release_require_plist_value "${release_autofill_info}" "ITSAppUsesNonExemptEncryption" "true"
+    release_require_plist_key_absent "${release_main_info}" "ITSAppUsesNonExemptEncryption"
+    release_require_plist_key_absent "${release_main_info}" "ITSEncryptionExportComplianceCode"
+    release_require_plist_key_absent "${release_autofill_info}" "ITSAppUsesNonExemptEncryption"
+    release_require_plist_key_absent "${release_autofill_info}" "ITSEncryptionExportComplianceCode"
 
     release_require_plist_value "${release_export_options}" "method" "app-store-connect"
     release_require_plist_value "${release_export_options}" "destination" "export"
@@ -403,7 +413,10 @@ release_validate_embedded_profile() {
 release_capture_entitlements() {
     local release_bundle_path="$1"
     local release_output_path="$2"
-    codesign -d --entitlements :- "${release_bundle_path}" > "${release_output_path}" 2>/dev/null \
+    command -v derq >/dev/null 2>&1 \
+        || release_die "derq is required to decode DER code-signing entitlements"
+    codesign -d --der --entitlements - "${release_bundle_path}" 2>/dev/null \
+        | derq query -i - -x > "${release_output_path}" \
         || release_die "cannot read code-signing entitlements: ${release_bundle_path}"
     plutil -lint "${release_output_path}" >/dev/null \
         || release_die "invalid code-signing entitlements: ${release_bundle_path}"
@@ -476,6 +489,8 @@ release_verify_ipa() {
         || release_die "IPA version is ${release_actual_version}, expected ${release_expected_version}"
     [[ "${release_actual_build}" == "${release_expected_build}" ]] \
         || release_die "IPA build is ${release_actual_build}, expected ${release_expected_build}"
+    release_require_plist_key_absent "${release_app_path}/Info.plist" "ITSAppUsesNonExemptEncryption"
+    release_require_plist_key_absent "${release_app_path}/Info.plist" "ITSEncryptionExportComplianceCode"
 
     if [[ -d "${release_app_path}/PlugIns" ]]; then
         while IFS= read -r -d '' release_candidate_extension; do
@@ -488,6 +503,8 @@ release_verify_ipa() {
     fi
     [[ "${release_autofill_count}" == "1" ]] \
         || release_die "IPA contains ${release_autofill_count} matching AutoFill extensions, expected 1"
+    release_require_plist_key_absent "${release_autofill_path}/Info.plist" "ITSAppUsesNonExemptEncryption"
+    release_require_plist_key_absent "${release_autofill_path}/Info.plist" "ITSEncryptionExportComplianceCode"
 
     codesign --verify --strict "${release_autofill_path}"
     codesign --verify --deep --strict "${release_app_path}"
