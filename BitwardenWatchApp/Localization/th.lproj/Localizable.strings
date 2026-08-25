@@ -1,0 +1,10 @@
+"ThereAreNoItemsToList" = "ไม่มีรายการที่จะแสดง";
+"ToViewVerificationCodesUpgradeToPremium" = "อัปเกรดเป็นพรีเมียมเพื่อดูรหัสยืนยัน";
+"Add2FactorAutenticationToAnItemToViewVerificationCodes" = "เพิ่มการยืนยันตัวตนสองขั้นตอนในรายการเพื่อดูรหัสยืนยัน";
+"LogInToBitwardenOnYourIPhoneToViewVerificationCodes" = "เข้าสู่ระบบ Bitwarden บน iPhone ของคุณเพื่อดูรหัสยืนยัน";
+"SyncingItemsContainingVerificationCodes" = "กำลังซิงค์รายการที่มีรหัสยืนยัน";
+"UnlockBitwardenOnYourIPhoneToViewVerificationCodes" = "ปลดล็อก Bitwarden บน iPhone ของคุณเพื่อดูรหัสยืนยัน";
+"SetUpBitwardenToViewItemsContainingVerificationCodes" = "ตั้งค่า Bitwarden เพื่อดูรายการที่มีรหัสยืนยัน";
+"Search" = "ค้นหา";
+"NoItemsFound" = "ไม่พบรายการ";
+"SetUpAppleWatchPasscodeInOrderToUseBitwarden" = "ตั้งค่ารหัสผ่าน Apple Watch เพื่อใช้งาน Bitwarden";

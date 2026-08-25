@@ -1,0 +1,885 @@
+import BitwardenKit
+import BitwardenResources
+import BitwardenSdk
+import Combine
+import SwiftUI
+
+// swiftlint:disable file_length
+
+// MARK: - VaultListProcessor
+
+/// The processor used to manage state and handle actions for the vault list screen.
+///
+final class VaultListProcessor: StateProcessor<
+    VaultListState,
+    VaultListAction,
+    VaultListEffect,
+> {
+    // MARK: Types
+
+    typealias Services = HasApplication
+        & HasAuthRepository
+        & HasAuthService
+        & HasBillingRepository
+        & HasBillingService
+        & HasChangeKdfService
+        & HasEnvironmentService
+        & HasErrorReporter
+        & HasEventService
+        & HasFlightRecorder
+        & HasNotificationService
+        & HasPasteboardService
+        & HasPolicyService
+        & HasReviewPromptService
+        & HasSearchProcessorMediatorFactory
+        & HasStateService
+        & HasSyncService
+        & HasTimeProvider
+        & HasVaultRepository
+
+    // MARK: Private Properties
+
+    /// The `Coordinator` that handles navigation.
+    private let coordinator: AnyCoordinator<VaultRoute, AuthAction>
+
+    /// Whether the cipher decryption failure alert was shown to the user, if the vault has any
+    /// ciphers which failed to decrypt.
+    private(set) var hasShownCipherDecryptionFailureAlert = false
+
+    /// The helper to handle master password reprompts.
+    private let masterPasswordRepromptHelper: MasterPasswordRepromptHelper
+
+    /// The helper used to navigate to the Premium upgrade flow.
+    lazy var premiumUpgradeHelper: PremiumUpgradeHelper = DefaultPremiumUpgradeHelper(
+        services: services,
+        coordinator: coordinator,
+        setURL: { [weak self] url in self?.state.url = url },
+        onPendingDismiss: { [weak self] in
+            Task { @MainActor in await self?.dismissPremiumUpgradeActionCard() }
+        },
+    )
+
+    /// The task that schedules the app review prompt.
+    private(set) var reviewPromptTask: Task<Void, Never>?
+
+    /// The mediator between processors and search publisher/subscription behavior.
+    private let searchProcessorMediator: SearchProcessorMediator
+
+    /// The services used by this processor.
+    private let services: Services
+
+    /// The helper to handle the more options menu for a vault item.
+    private let vaultItemMoreOptionsHelper: VaultItemMoreOptionsHelper
+
+    // MARK: Initialization
+
+    /// Creates a new `VaultListProcessor`.
+    ///
+    /// - Parameters:
+    ///   - coordinator: The `Coordinator` that handles navigation.
+    ///   - masterPasswordRepromptHelper: The helper to handle master password reprompts.
+    ///   - services: The services used by this processor.
+    ///   - state: The initial state of the processor.
+    ///   - vaultItemMoreOptionsHelper: The helper to handle the more options menu for a vault item.
+    ///
+    init(
+        coordinator: AnyCoordinator<VaultRoute, AuthAction>,
+        masterPasswordRepromptHelper: MasterPasswordRepromptHelper,
+        services: Services,
+        state: VaultListState,
+        vaultItemMoreOptionsHelper: VaultItemMoreOptionsHelper,
+    ) {
+        self.coordinator = coordinator
+        self.masterPasswordRepromptHelper = masterPasswordRepromptHelper
+        searchProcessorMediator = services.searchProcessorMediatorFactory.make()
+        self.services = services
+        self.vaultItemMoreOptionsHelper = vaultItemMoreOptionsHelper
+
+        super.init(state: state)
+    }
+
+    deinit {
+        reviewPromptTask?.cancel()
+    }
+
+    // MARK: Methods
+
+    override func perform(_ effect: VaultListEffect) async {
+        switch effect {
+        case .appeared:
+            await appeared()
+        case .checkAppReviewEligibility:
+            await checkAppReviewEligibility()
+        case .dismissArchiveOnboardingActionCard:
+            await dismissArchiveOnboardingActionCard()
+        case .dismissFlightRecorderToastBanner:
+            await dismissFlightRecorderToastBanner()
+        case .dismissImportLoginsActionCard:
+            await setImportLoginsProgress(.setUpLater)
+        case .dismissOrganizationBanner:
+            await dismissOrganizationBanner()
+        case .dismissPremiumUpgradeActionCard:
+            await dismissPremiumUpgradeActionCard()
+        case .dismissUpgradedToPremiumActionCard:
+            state.shouldShowUpgradedToPremiumActionCard = false
+            await services.billingService.setUpgradedToPremiumActionCardDismissed()
+        case let .morePressed(item):
+            await morePressed(item: item)
+        case let .profileSwitcher(profileEffect):
+            await handleProfileSwitcherEffect(profileEffect)
+        case .refreshAccountProfiles:
+            await refreshProfileState()
+        case .refreshVault:
+            await refreshVault(syncWithPeriodicCheck: false)
+        case let .search(text):
+            await searchVault(for: text)
+        case .streamAccountSetupProgress:
+            await streamAccountSetupProgress()
+        case .streamFlightRecorderLog:
+            await streamFlightRecorderLog()
+        case .streamOrganizations:
+            await streamOrganizations()
+        case .streamShowWebIcons:
+            await streamShowWebIcons()
+        case .streamVaultList:
+            await streamVaultList()
+        case .tryAgainTapped:
+            await tryAgainTapped()
+        }
+    }
+
+    override func receive(_ action: VaultListAction) {
+        switch action {
+        case .addFolder:
+            coordinator.navigate(to: .addFolder)
+        case let .addItemPressed(type):
+            addItem(type: type)
+        case .appReviewPromptShown:
+            handleAppReviewPromptShown()
+        case .clearURL:
+            state.url = nil
+        case .copyTOTPCode:
+            break
+        case .disappeared:
+            reviewPromptTask?.cancel()
+        case .goToArchive:
+            coordinator.navigate(to: .group(.archive, filter: state.vaultFilterType))
+        case let .itemPressed(item):
+            handleItemTapped(item)
+        case .learnMoreAboutPremium:
+            state.url = ExternalLinksConstants.learnMoreAboutPremium
+            state.shouldShowUpgradedToPremiumActionCard = false
+            Task { await services.billingService.setUpgradedToPremiumActionCardDismissed() }
+        case .navigateToFlightRecorderSettings:
+            coordinator.navigate(to: .flightRecorderSettings)
+        case let .profileSwitcher(profileAction):
+            handleProfileSwitcherAction(profileAction)
+        case let .searchStateChanged(isSearching: isSearching):
+            searchStateChanged(isSearching: isSearching)
+        case let .searchTextChanged(newValue):
+            state.searchText = newValue
+        case let .searchVaultFilterChanged(newValue):
+            state.searchVaultFilterType = newValue
+        case let .sectionExpandToggled(sectionId, isExpanded):
+            setSectionExpanded(sectionId: sectionId, isExpanded: isExpanded)
+        case .showImportLogins:
+            coordinator.navigate(to: .importLogins)
+        case let .toastShown(newValue):
+            state.toast = newValue
+        case .totpCodeExpired:
+            // No-op: TOTP codes aren't shown on the list view and can't be copied.
+            break
+        case .upgradeToPremium:
+            upgradeToPremium()
+        case let .vaultFilterChanged(newValue):
+            state.vaultFilterType = newValue
+        case .viewPlan:
+            coordinator.navigate(to: .premiumPlan)
+        }
+    }
+}
+
+extension VaultListProcessor {
+    // MARK: Private Methods
+
+    /// Handles the app review prompt shown action by updating state and clearing review data.
+    private func handleAppReviewPromptShown() {
+        state.isEligibleForAppReview = false
+        Task {
+            await services.reviewPromptService.setReviewPromptShownVersion()
+            await services.reviewPromptService.clearUserActions()
+        }
+    }
+
+    /// Navigates to the add vault item screen.
+    ///
+    /// - Parameter type: The type of vault item to add.
+    ///
+    private func addItem(type: CipherType) {
+        setProfileSwitcher(visible: false)
+        switch state.vaultFilterType {
+        case let .organization(organization):
+            coordinator.navigate(
+                to: .addItem(organizationId: organization.id, type: type),
+                context: self,
+            )
+        default:
+            coordinator.navigate(
+                to: .addItem(type: type),
+                context: self,
+            )
+        }
+        reviewPromptTask?.cancel()
+    }
+
+    /// Called when the vault list appears on screen.
+    private func appeared() async {
+        await refreshVault(syncWithPeriodicCheck: true)
+        // Read after sync so the cache has been refreshed by onFetchSyncSucceeded if a sync ran.
+        await refreshPremiumActionCards()
+        await handleNotifications()
+        await checkPendingLoginRequests()
+        await checkPersonalOwnershipPolicy()
+        await loadItemTypesUserCanCreate()
+        await loadOrganizationUserNotificationBannerData()
+
+        state.hasPremium = await services.stateService.doesActiveAccountHavePremium()
+
+        state.shouldShowArchiveOnboardingActionCard = await services.stateService.shouldDoArchiveOnboarding()
+    }
+
+    /// Checks if the user is eligible for an app review prompt and schedules one if so.
+    private func checkAppReviewEligibility() async {
+        if await services.reviewPromptService.isEligibleForReviewPrompt() {
+            await scheduleReviewPrompt()
+        } else {
+            state.isEligibleForAppReview = false
+        }
+    }
+
+    /// Checks if the user needs to update their KDF settings.
+    private func checkIfForceKdfUpdateRequired() async {
+        guard await services.changeKdfService.needsKdfUpdateToMinimums() else { return }
+
+        coordinator.showAlert(.updateEncryptionSettings { password in
+            self.coordinator.showLoadingOverlay(title: Localizations.updating)
+            defer { self.coordinator.hideLoadingOverlay() }
+
+            do {
+                try await self.services.changeKdfService.updateKdfToMinimums(password: password)
+                self.coordinator.showToast(Localizations.encryptionSettingsUpdated)
+            } catch {
+                self.services.errorReporter.log(error: error)
+                await self.coordinator.showErrorAlert(error: error)
+            }
+        })
+    }
+
+    /// Check if there are any pending login requests for the user to deal with.
+    private func checkPendingLoginRequests() async {
+        do {
+            // If the user had previously received a notification for a login request
+            // but hasn't been able to view it yet, open the request now.
+            let userId = try await services.stateService.getActiveAccountId()
+            if let loginRequestData = await services.stateService.getLoginRequest(),
+               loginRequestData.userId == userId {
+                // Show the login request if it's still valid.
+                if let loginRequest = try await services.authService.getPendingLoginRequest(withId: loginRequestData.id)
+                    .first,
+                    !loginRequest.isAnswered,
+                    !loginRequest.isExpired {
+                    coordinator.navigate(to: .loginRequest(loginRequest))
+                }
+
+                // Since the request has been handled, remove it from local storage.
+                await services.stateService.setLoginRequest(nil)
+            }
+        } catch is PendingLoginRequestError {
+            // Login request no longer exists on the server (e.g., expired); clear it from state.
+            await services.stateService.setLoginRequest(nil)
+        } catch {
+            services.errorReporter.log(error: error)
+        }
+    }
+
+    /// Checks if the personal ownership policy is enabled.
+    ///
+    private func checkPersonalOwnershipPolicy() async {
+        let isPersonalOwnershipDisabled = await services.policyService.policyAppliesToUser(.personalOwnership)
+        state.isPersonalOwnershipDisabled = isPersonalOwnershipDisabled
+        state.canShowVaultFilter = await services.vaultRepository.canShowVaultFilter()
+    }
+
+    /// Checks available item types user can create.
+    ///
+    private func loadItemTypesUserCanCreate() async {
+        state.itemTypesUserCanCreate = await services.vaultRepository.getItemTypesUserCanCreate()
+    }
+
+    /// Dismisses the archive onboarding action card and persists the preference.
+    private func dismissArchiveOnboardingActionCard() async {
+        state.shouldShowArchiveOnboardingActionCard = false
+        await services.stateService.setArchiveOnboardingShown(true)
+    }
+
+    /// Dismisses the flight recorder toast banner for the active user.
+    ///
+    private func dismissFlightRecorderToastBanner() async {
+        await services.flightRecorder.setFlightRecorderBannerDismissed()
+    }
+
+    /// Dismisses the organization user notification banner.
+    ///
+    private func dismissOrganizationBanner() async {
+        // TODO: PM-33861 Persist banner dismissal data
+        state.organizationUserNotificationBannerData = nil
+    }
+
+    /// Dismisses the Premium upgrade action card and persists the banner-dismissed preference.
+    private func dismissPremiumUpgradeActionCard() async {
+        do {
+            try await services.stateService.setPremiumUpgradeBannerDismissed(true)
+            state.shouldShowPremiumUpgradeActionCard = false
+        } catch {
+            services.errorReporter.log(error: error)
+        }
+    }
+
+    /// If the vault has ciphers which failed to decrypt, and the cipher decryption failure alert
+    /// hasn't been shown yet, notify the user that a cipher(s) failed to decrypt.
+    ///
+    /// - Parameter cipherIds: The list of identifiers for ciphers which failed to decrypt.
+    ///
+    private func handleCipherDecryptionFailures(cipherIds: [Uuid]) {
+        guard !cipherIds.isEmpty, !hasShownCipherDecryptionFailureAlert else { return }
+        coordinator.showAlert(.cipherDecryptionFailure(cipherIds: cipherIds, isFromCipherTap: false) { stringToCopy in
+            self.services.pasteboardService.copy(stringToCopy)
+        })
+        hasShownCipherDecryptionFailureAlert = true
+    }
+
+    /// Handles the primary action for when a `VaultListItem` is tapped in the list.
+    ///
+    /// - Parameter item: The `VaultListItem` that was tapped.
+    ///
+    private func handleItemTapped(_ item: VaultListItem) {
+        switch item.itemType {
+        case let .cipher(cipherListView, _):
+            if cipherListView.isDecryptionFailure, let cipherId = cipherListView.id {
+                coordinator.showAlert(.cipherDecryptionFailure(cipherIds: [cipherId]) { stringToCopy in
+                    self.services.pasteboardService.copy(stringToCopy)
+                })
+            } else {
+                navigateToViewItem(cipherListView: cipherListView, id: item.id)
+            }
+        case let .group(group, count):
+            if !state.hasPremium, group == .archive, count == 0 {
+                coordinator.showAlert(
+                    Alert.archiveUnavailable(action: { [weak self] in
+                        Task { [weak self] in
+                            await self?.navigateToPremiumUpgrade()
+                        }
+                    }),
+                )
+                return
+            }
+            coordinator.navigate(to: .group(group, filter: state.vaultFilterType))
+        case let .totp(_, model):
+            navigateToViewItem(cipherListView: model.cipherListView, id: model.id)
+        }
+    }
+
+    /// Entry point to handling things around push notifications.
+    private func handleNotifications() async {
+        switch await services.notificationService.notificationAuthorization() {
+        case .authorized:
+            await registerForNotifications()
+        case .notDetermined:
+            await requestNotificationPermissions()
+        default:
+            break
+        }
+    }
+
+    /// Loads the organization user notification banner data.
+    private func loadOrganizationUserNotificationBannerData() async {
+        state.organizationUserNotificationBannerData = await services.policyService
+            .getOrganizationUserNotificationBannerData()
+    }
+
+    /// Navigates to the view item view for the specified cipher. If the cipher requires master
+    /// password reprompt, this will prompt the user before navigation.
+    ///
+    /// - Parameters:
+    ///     - cipherListView: The cipher list view item for the cipher that will be shown in the view item view.
+    ///     - id: The cipher's identifier.
+    ///
+    private func navigateToViewItem(cipherListView: CipherListView, id: String) {
+        Task {
+            await masterPasswordRepromptHelper.repromptForMasterPasswordIfNeeded(cipherListView: cipherListView) {
+                self.coordinator.navigate(
+                    to: .viewItem(id: id, masterPasswordRepromptCheckCompleted: true),
+                    context: self,
+                )
+            }
+        }
+    }
+
+    /// Refreshes the visibility of the premium-related action cards, ensuring the subscription
+    /// attention card and the upgrade card are mutually exclusive — the attention card takes
+    /// priority when a payment problem is detected.
+    ///
+    private func refreshPremiumActionCards() async {
+        state.shouldShowSubscriptionAttentionCard =
+            await services.billingService.shouldShowSubscriptionAttentionCard()
+        state.shouldShowUpgradedToPremiumActionCard =
+            await services.billingService.shouldShowUpgradedToPremiumActionCard()
+
+        let isBannerDismissed = await services.stateService.isPremiumUpgradeBannerDismissed()
+        guard !isBannerDismissed, !state.shouldShowSubscriptionAttentionCard else {
+            state.shouldShowPremiumUpgradeActionCard = false
+            return
+        }
+        state.shouldShowPremiumUpgradeActionCard =
+            await services.billingRepository.isInAppUpgradeAvailable()
+    }
+
+    /// Refreshes the vault's contents.
+    ///
+    /// - Parameter syncWithPeriodicCheck: Whether the sync should take into consideration
+    /// the periodic check.
+    private func refreshVault(syncWithPeriodicCheck: Bool) async {
+        do {
+            let takingTimeTask = Task {
+                try await Task.sleep(forSeconds: 5)
+                // If we already have data, don't show the toast
+                guard case .loading = self.state.loadingState else { return }
+                self.state.toast = Toast(title: Localizations.thisIsTakingLongerThanExpected, mode: .manualDismiss)
+            }
+            defer {
+                state.toast = nil
+                takingTimeTask.cancel()
+            }
+
+            try await services.vaultRepository.fetchSync(
+                forceSync: false,
+                isPeriodic: syncWithPeriodicCheck,
+            )
+
+            if try await services.vaultRepository.isVaultEmpty() {
+                // Normally after syncing the database will publish the contents of the vault which is
+                // used to transition from the loading to loaded state. If the vault is empty, nothing
+                // will be published by the database, so it needs to be manually updated.
+                state.loadingState = .data([])
+            }
+
+            await checkIfForceKdfUpdateRequired()
+        } catch URLError.cancelled {
+            // No-op: don't log or alert for cancellation errors.
+        } catch {
+            services.errorReporter.log(error: error)
+
+            let needsSync = try? await services.vaultRepository.needsSync()
+            if needsSync == true {
+                // If the vault needs a sync and there are cached items,
+                // display the cached data and show an error alert.
+                if let sections = state.loadingState.data, !sections.isEmpty {
+                    await coordinator.showErrorAlert(error: error)
+                } else {
+                    // If the vault needs a sync and there were no cached items,
+                    // show the full screen error view.
+                    state.loadingState = .error(
+                        errorMessage: Localizations.weAreUnableToProcessYourRequestPleaseTryAgainOrContactUs,
+                    )
+                }
+            } else {
+                await coordinator.showErrorAlert(error: error)
+            }
+        }
+    }
+
+    /// Attempts to register the device for push notifications.
+    /// We only need to register once a day.
+    private func registerForNotifications() async {
+        do {
+            let lastReg = try await services.stateService.getNotificationsLastRegistrationDate() ?? Date.distantPast
+            if services.timeProvider.timeSince(lastReg) >= 86400 { // One day
+                services.application?.registerForRemoteNotifications()
+                try await services.stateService.setNotificationsLastRegistrationDate(services.timeProvider.presentTime)
+            }
+        } catch {
+            services.errorReporter.log(error: error)
+        }
+    }
+
+    /// Request permission to send push notifications.
+    private func requestNotificationPermissions() async {
+        // Show the explanation alert before asking for permissions.
+        coordinator.showAlert(
+            .pushNotificationsInformation { [services] in
+                do {
+                    let authorized = try await services.notificationService
+                        .requestAuthorization(options: [.alert, .sound, .badge])
+                    if authorized {
+                        await self.registerForNotifications()
+                    }
+                } catch {
+                    self.services.errorReporter.log(error: error)
+                }
+            },
+        )
+    }
+
+    /// Function to be called when new search results are received.
+    /// - Parameters:
+    ///     - data: The new search results data.
+    ///
+    private func searchResultsReceived(data: VaultListData) {
+        let items = data.sections.first?.items ?? []
+        state.searchResults = items
+    }
+
+    /// Handles the search state change action.
+    ///
+    /// - Parameter isSearching: Whether the user has started or stopped searching.
+    ///
+    private func searchStateChanged(isSearching: Bool) {
+        guard isSearching else {
+            state.searchText = ""
+            state.searchResults = []
+            searchProcessorMediator.stopSearching()
+            return
+        }
+        searchProcessorMediator.startSearching(mode: nil) { [weak self] data in
+            self?.searchResultsReceived(data: data)
+        }
+        state.profileSwitcherState.isVisible = !isSearching
+    }
+
+    /// Searches the vault using the provided string and sets to state any matching results.
+    ///
+    /// - Parameter searchText: The string to use when searching the vault.
+    ///
+    private func searchVault(for searchText: String) async {
+        guard !searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            state.searchResults = []
+            return
+        }
+
+        searchProcessorMediator.updateFilter(
+            VaultListFilter(
+                filterType: state.searchVaultFilterType,
+                searchText: searchText,
+            ),
+        )
+    }
+
+    /// Sets the user's import logins progress.
+    ///
+    /// - Parameter progress: The user's import logins progress.
+    ///
+    private func setImportLoginsProgress(_ progress: AccountSetupProgress) async {
+        do {
+            try await services.stateService.setAccountSetupImportLogins(progress)
+        } catch {
+            services.errorReporter.log(error: error)
+            coordinator.showAlert(.defaultAlert(error: error))
+        }
+    }
+
+    /// Sets the visibility of the profiles view and updates accessibility focus.
+    ///
+    /// - Parameter visible: the intended visibility of the view.
+    ///
+    private func setProfileSwitcher(visible: Bool) {
+        if !visible {
+            state.profileSwitcherState.hasSetAccessibilityFocus = false
+        }
+        state.profileSwitcherState.isVisible = visible
+    }
+
+    /// Triggers the app review prompt after a delay.
+    private func scheduleReviewPrompt() async {
+        reviewPromptTask?.cancel()
+        reviewPromptTask = Task {
+            do {
+                try await Task.sleep(nanoseconds: Constants.appReviewPromptDelay)
+                state.isEligibleForAppReview = true
+            } catch is CancellationError {
+                // Task was cancelled, no need to handle this error
+            } catch {
+                services.errorReporter.log(error: error)
+            }
+        }
+    }
+
+    /// Shows the more options alert for the given vault item.
+    ///
+    /// - Parameter item: The vault list item for which to show more options.
+    ///
+    private func morePressed(item: VaultListItem) async {
+        await vaultItemMoreOptionsHelper.showMoreOptionsAlert(
+            for: item,
+            handleDisplayToast: { [weak self] toast in
+                self?.state.toast = toast
+            },
+            handleNavigateToPremiumUpgrade: { [weak self] in
+                await self?.navigateToPremiumUpgrade()
+            },
+            handleOpenURL: { [weak self] url in
+                self?.state.url = url
+            },
+        )
+    }
+
+    /// Handles state updates after a Premium upgrade is confirmed.
+    ///
+    private func handlePremiumUpgradeConfirmed() async {
+        await refreshVault(syncWithPeriodicCheck: false)
+        state.hasPremium = await services.stateService.doesActiveAccountHavePremium()
+        state.shouldShowPremiumUpgradeActionCard = !state.hasPremium
+        state.shouldShowUpgradedToPremiumActionCard = state.hasPremium
+    }
+
+    /// Navigates to the Premium upgrade flow. Uses the in-app upgrade path when available;
+    /// otherwise opens the web vault upgrade URL as a fallback.
+    ///
+    private func navigateToPremiumUpgrade() async {
+        await premiumUpgradeHelper.navigateToPremiumUpgrade(onConfirmed: { [weak self] in
+            await self?.handlePremiumUpgradeConfirmed()
+        })
+    }
+
+    /// Streams the user's account setup progress.
+    ///
+    private func streamAccountSetupProgress() async {
+        do {
+            for await badgeState in try await services.stateService.settingsBadgePublisher().values {
+                state.importLoginsSetupProgress = badgeState.importLoginsSetupProgress
+            }
+        } catch {
+            services.errorReporter.log(error: error)
+        }
+    }
+
+    /// Streams the flight recorder enabled status.
+    ///
+    private func streamFlightRecorderLog() async {
+        for await log in await services.flightRecorder.activeLogPublisher().values {
+            state.flightRecorderToastBanner.activeLog = log
+        }
+    }
+
+    /// Streams the user's organizations.
+    private func streamOrganizations() async {
+        do {
+            for try await organizations in try await services.vaultRepository.organizationsPublisher() {
+                state.organizations = organizations
+            }
+        } catch {
+            services.errorReporter.log(error: error)
+        }
+    }
+
+    /// Streams the web icons visibility setting and updates state accordingly.
+    private func streamShowWebIcons() async {
+        for await value in await services.stateService.showWebIconsPublisher().values {
+            state.showWebIcons = value
+        }
+    }
+
+    /// Persists the expanded / collapsed state of a vault list section.
+    ///
+    /// The in-memory state is updated synchronously so the header animates immediately, then the
+    /// collapsed section IDs are persisted to disk so the preference survives app launches.
+    ///
+    /// - Parameters:
+    ///   - sectionId: The ID of the section that was expanded or collapsed.
+    ///   - isExpanded: Whether the section is now expanded.
+    ///
+    private func setSectionExpanded(sectionId: String, isExpanded: Bool) {
+        if isExpanded {
+            state.collapsedSectionIds.remove(sectionId)
+        } else {
+            state.collapsedSectionIds.insert(sectionId)
+        }
+        let collapsedSectionIds = Array(state.collapsedSectionIds)
+        Task {
+            do {
+                try await services.stateService.setCollapsedVaultListSectionIds(collapsedSectionIds)
+            } catch {
+                services.errorReporter.log(error: error)
+            }
+        }
+    }
+
+    /// Streams the user's vault list.
+    private func streamVaultList() async {
+        do {
+            let collapsedSectionIds = await (try? services.stateService.getCollapsedVaultListSectionIds()) ?? []
+            state.collapsedSectionIds = Set(collapsedSectionIds)
+            for try await vaultList in try await services.vaultRepository
+                .vaultListPublisher(
+                    filter: VaultListFilter(
+                        filterType: state.vaultFilterType,
+                        options: [.addTOTPGroup, .addHiddenItemsGroup],
+                    ),
+                ) {
+                // Check if the vault needs a sync.
+                let needsSync = try await services.vaultRepository.needsSync()
+
+                let value = vaultList.sections
+
+                // If the data is empty, check to ensure that a sync is not needed.
+                if !needsSync || !value.isEmpty {
+                    // Dismiss the "this is taking a while" toast now that we have data,
+                    // since this might not happen because of the sync in `refreshVault()`.
+                    state.toast = nil
+                    // If the data is not empty or if a sync is not needed, set the data.
+                    state.loadingState = .data(value)
+                } else {
+                    // Otherwise mark the state as `.loading` until the sync is complete.
+                    state.loadingState = .loading(value)
+                }
+
+                // Dismiss the import logins action card once the vault has items in it.
+                if !value.isEmpty {
+                    await setImportLoginsProgress(.complete)
+                }
+                // Dismiss the coach mark action cards once the vault has at least one login item in it.
+                if value.hasLoginItems {
+                    await services.stateService.setLearnNewLoginActionCardStatus(.complete)
+                    await services.stateService.setLearnGeneratorActionCardStatus(.complete)
+                }
+                // Alert the user of any cipher decryption failures.
+                handleCipherDecryptionFailures(cipherIds: vaultList.cipherDecryptionFailureIds)
+            }
+        } catch {
+            services.errorReporter.log(error: error)
+        }
+    }
+
+    /// Resets the loading state and re-runs the appeared flow.
+    private func tryAgainTapped() async {
+        state.loadingState = .loading(nil)
+        await appeared()
+    }
+
+    /// Subscribes to Premium checkout status and navigates to the upgrade screen.
+    private func upgradeToPremium() {
+        premiumUpgradeHelper.startInAppPremiumUpgrade(onConfirmed: { [weak self] in
+            await self?.handlePremiumUpgradeConfirmed()
+        })
+    }
+}
+
+// MARK: - CipherItemOperationDelegate
+
+extension VaultListProcessor: CipherItemOperationDelegate {
+    func itemArchived() {
+        state.toast = Toast(title: Localizations.itemMovedToArchive)
+    }
+
+    func itemDeleted() {
+        state.toast = Toast(title: Localizations.itemDeleted)
+    }
+
+    func itemSoftDeleted() {
+        state.toast = Toast(title: Localizations.itemSoftDeleted)
+    }
+
+    func itemRestored() {
+        state.toast = Toast(title: Localizations.itemRestored)
+    }
+
+    func itemUnarchived() {
+        state.toast = Toast(title: Localizations.itemMovedToVault)
+    }
+}
+
+// MARK: - MoreOptionsAction
+
+/// The actions available from the More Options alert.
+enum MoreOptionsAction: Equatable {
+    /// Archives a  cipher.
+    case archive(cipherView: CipherView)
+
+    /// Copy the `value` and show a toast with the `toast` string.
+    case copy(
+        toast: String,
+        value: String,
+        requiresMasterPasswordReprompt: Bool,
+        logEvent: EventType?,
+        cipherId: String?,
+    )
+
+    /// Generate and copy the TOTP code for the given `totpKey`.
+    case copyTotp(totpKey: TOTPKeyModel)
+
+    /// Navigate to the view to edit the `cipherView`.
+    case edit(cipherView: CipherView)
+
+    /// Launch the `url` in the device's browser.
+    case launch(url: URL)
+
+    /// Unarchives a  cipher.
+    case unarchive(cipherView: CipherView)
+
+    /// Navigate to view the item with the given `id`.
+    case view(id: String)
+}
+
+// MARK: - ProfileSwitcherHandler
+
+extension VaultListProcessor: ProfileSwitcherHandler {
+    var allowLockAndLogout: Bool {
+        true
+    }
+
+    var profileServices: ProfileServices {
+        services
+    }
+
+    var profileSwitcherState: ProfileSwitcherState {
+        get {
+            state.profileSwitcherState
+        }
+        set {
+            state.profileSwitcherState = newValue
+        }
+    }
+
+    var shouldHideAddAccount: Bool {
+        false
+    }
+
+    var toast: Toast? {
+        get {
+            state.toast
+        }
+        set {
+            state.toast = newValue
+        }
+    }
+
+    func handleAuthEvent(_ authEvent: AuthEvent) async {
+        guard case let .action(authAction) = authEvent else { return }
+        await coordinator.handleEvent(authAction)
+    }
+
+    func dismissProfileSwitcher() {
+        coordinator.navigate(to: .dismiss())
+    }
+
+    func showAddAccount() {
+        coordinator.navigate(to: .addAccount)
+    }
+
+    func showAlert(_ alert: BitwardenKit.Alert) {
+        coordinator.showAlert(alert)
+    }
+
+    func showProfileSwitcher() {
+        coordinator.navigate(to: .viewProfileSwitcher, context: self)
+    }
+}

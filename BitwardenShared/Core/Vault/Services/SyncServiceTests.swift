@@ -1,0 +1,1530 @@
+import BitwardenKit
+import BitwardenKitMocks
+import TestHelpers
+import XCTest
+
+@testable import BitwardenShared
+@testable import BitwardenSharedMocks
+
+import BitwardenSdk
+
+@MainActor
+class SyncServiceTests: BitwardenTestCase { // swiftlint:disable:this type_body_length
+    // MARK: Properties
+
+    var appContextHelper: MockAppContextHelper!
+    var cipherService: MockCipherService!
+    var client: MockHTTPClient!
+    var clientService: MockClientService!
+    var collectionService: MockCollectionService!
+    var configService: MockConfigService!
+    var fillAssistRepository: MockFillAssistRepository!
+    var flightRecorder: MockFlightRecorder!
+    var folderService: MockFolderService!
+    var keyConnectorService: MockKeyConnectorService!
+    var organizationService: MockOrganizationService!
+    var policyService: MockPolicyService!
+    var sendService: MockSendService!
+    var settingsService: MockSettingsService!
+    var stateService: MockStateService!
+    var subject: SyncService!
+    var syncServiceDelegate: MockSyncServiceDelegate!
+    var timeProvider: MockTimeProvider!
+    var userSessionStateService: MockUserSessionStateService!
+    var vaultTimeoutService: MockVaultTimeoutService!
+
+    // MARK: Setup & Teardown
+
+    override func setUp() { // swiftlint:disable:this function_body_length
+        super.setUp()
+
+        appContextHelper = MockAppContextHelper()
+        cipherService = MockCipherService()
+        client = MockHTTPClient()
+        clientService = MockClientService()
+        collectionService = MockCollectionService()
+        configService = MockConfigService()
+        fillAssistRepository = MockFillAssistRepository()
+        flightRecorder = MockFlightRecorder()
+        folderService = MockFolderService()
+        keyConnectorService = MockKeyConnectorService()
+        organizationService = MockOrganizationService()
+        policyService = MockPolicyService()
+        sendService = MockSendService()
+        settingsService = MockSettingsService()
+        stateService = MockStateService()
+        syncServiceDelegate = MockSyncServiceDelegate()
+        timeProvider = MockTimeProvider(
+            .mockTime(
+                Date(
+                    year: 2024,
+                    month: 2,
+                    day: 14,
+                ),
+            ),
+        )
+        userSessionStateService = MockUserSessionStateService()
+        vaultTimeoutService = MockVaultTimeoutService()
+
+        userSessionStateService.getVaultTimeoutReturnValue = .fifteenMinutes
+
+        subject = DefaultSyncService(
+            accountAPIService: APIService(client: client),
+            appContextHelper: appContextHelper,
+            cipherService: cipherService,
+            clientService: clientService,
+            collectionService: collectionService,
+            configService: configService,
+            fillAssistRepository: fillAssistRepository,
+            flightRecorder: flightRecorder,
+            folderService: folderService,
+            keyConnectorService: keyConnectorService,
+            organizationService: organizationService,
+            policyService: policyService,
+            sendService: sendService,
+            settingsService: settingsService,
+            stateService: stateService,
+            syncAPIService: APIService(client: client),
+            timeProvider: timeProvider,
+            userSessionStateService: userSessionStateService,
+            vaultTimeoutService: vaultTimeoutService,
+        )
+        subject.delegate = syncServiceDelegate
+    }
+
+    override func tearDown() async throws {
+        try await super.tearDown()
+
+        appContextHelper = nil
+        cipherService = nil
+        client = nil
+        clientService = nil
+        collectionService = nil
+        configService = nil
+        fillAssistRepository = nil
+        flightRecorder = nil
+        folderService = nil
+        keyConnectorService = nil
+        organizationService = nil
+        policyService = nil
+        sendService = nil
+        settingsService = nil
+        stateService = nil
+        subject = nil
+        syncServiceDelegate = nil
+        timeProvider = nil
+        userSessionStateService = nil
+        vaultTimeoutService = nil
+    }
+
+    // MARK: Tests
+
+    /// `checkTdeUserNeedsToSetPassword()` on sync check if the user needs to set a password
+    ///
+    func test_checkTdeUserNeedsToSetPassword_true() async throws {
+        client.result = .httpSuccess(testData: .syncWithProfileSingleOrg)
+        stateService.activeAccount = .fixtureWithTdeNoPassword()
+
+        try await subject.fetchSync(forceSync: false)
+
+        XCTAssertTrue(syncServiceDelegate.setMasterPasswordCalled)
+        XCTAssertEqual(syncServiceDelegate.setMasterPasswordOrgId, "org-2")
+    }
+
+    /// `checkTdeUserNeedsToSetPassword()` on sync check if the user needs to set a password
+    ///
+    func test_checkTdeUserNeedsToSetPassword_false() async throws {
+        client.result = .httpSuccess(testData: .syncWithProfileSingleOrg)
+        stateService.activeAccount = .fixtureWithTDE()
+
+        try await subject.fetchSync(forceSync: false)
+
+        XCTAssertFalse(syncServiceDelegate.setMasterPasswordCalled)
+        XCTAssertNil(syncServiceDelegate.setMasterPasswordOrgId)
+    }
+
+    /// `checkTdeUserNeedsToSetPassword()` returns false if the user doesn't use TDE.
+    func test_checkTdeUserNeedsToSetPassword_false_nonTDE() async throws {
+        client.result = .httpSuccess(testData: .syncWithProfileSingleOrg)
+        stateService.activeAccount = .fixture(
+            profile: .fixture(
+                userDecryptionOptions: UserDecryptionOptions(
+                    hasMasterPassword: false,
+                    keyConnectorOption: KeyConnectorUserDecryptionOption(keyConnectorUrl: ""),
+                    trustedDeviceOption: nil,
+                ),
+            ),
+        )
+
+        try await subject.fetchSync(forceSync: false)
+        XCTAssertFalse(syncServiceDelegate.setMasterPasswordCalled)
+    }
+
+    // MARK: - checkUserNeedsVaultMigration Tests
+
+    /// `checkUserNeedsVaultMigration()` calls delegate when running in an app extension
+    /// (migration is now supported in extensions).
+    @MainActor
+    func test_checkUserNeedsVaultMigration_appExtension() async throws {
+        appContextHelper.appContext = .appExtension
+        client.result = .httpSuccess(testData: .syncWithCiphers)
+        stateService.activeAccount = .fixture()
+        configService.featureFlagsBool[.migrateMyVaultToMyItems] = true
+        policyService.getEarliestOrganizationApplyingPolicyResult[.personalOwnership] = "org-123"
+        cipherService.hasPersonalCiphersResult = .success(true)
+
+        try await subject.fetchSync(forceSync: false)
+
+        XCTAssertTrue(cipherService.hasPersonalCiphersCalled)
+        XCTAssertTrue(syncServiceDelegate.migrateVaultToMyItemsCalled)
+        XCTAssertEqual(syncServiceDelegate.migrateVaultToMyItemsOrganizationId, "org-123")
+    }
+
+    /// `checkUserNeedsVaultMigration()` does not call delegate when feature flag is disabled.
+    @MainActor
+    func test_checkUserNeedsVaultMigration_featureFlagDisabled() async throws {
+        client.result = .httpSuccess(testData: .syncWithCiphers)
+        stateService.activeAccount = .fixture()
+        configService.featureFlagsBool[.migrateMyVaultToMyItems] = false
+        policyService.getEarliestOrganizationApplyingPolicyResult[.personalOwnership] = "org-123"
+        cipherService.hasPersonalCiphersResult = .success(true)
+
+        try await subject.fetchSync(forceSync: false)
+
+        XCTAssertFalse(cipherService.hasPersonalCiphersCalled)
+        XCTAssertFalse(syncServiceDelegate.migrateVaultToMyItemsCalled)
+        XCTAssertNil(syncServiceDelegate.migrateVaultToMyItemsOrganizationId)
+    }
+
+    /// `checkUserNeedsVaultMigration()` does not call delegate when no organization applies the policy.
+    @MainActor
+    func test_checkUserNeedsVaultMigration_noOrganizationAppliesPolicy() async throws {
+        client.result = .httpSuccess(testData: .syncWithCiphers)
+        stateService.activeAccount = .fixture()
+        configService.featureFlagsBool[.migrateMyVaultToMyItems] = true
+        policyService.getEarliestOrganizationApplyingPolicyResult[.personalOwnership] = nil
+        cipherService.hasPersonalCiphersResult = .success(true)
+
+        try await subject.fetchSync(forceSync: false)
+
+        XCTAssertFalse(cipherService.hasPersonalCiphersCalled)
+        XCTAssertFalse(syncServiceDelegate.migrateVaultToMyItemsCalled)
+        XCTAssertNil(syncServiceDelegate.migrateVaultToMyItemsOrganizationId)
+    }
+
+    /// `checkUserNeedsVaultMigration()` does not call delegate when user has no personal vault items.
+    @MainActor
+    func test_checkUserNeedsVaultMigration_noPersonalVaultItems() async throws {
+        client.result = .httpSuccess(testData: .syncWithCiphers)
+        stateService.activeAccount = .fixture()
+        configService.featureFlagsBool[.migrateMyVaultToMyItems] = true
+        policyService.getEarliestOrganizationApplyingPolicyResult[.personalOwnership] = "org-123"
+        cipherService.hasPersonalCiphersResult = .success(false)
+
+        try await subject.fetchSync(forceSync: false)
+
+        XCTAssertTrue(cipherService.hasPersonalCiphersCalled)
+        XCTAssertFalse(syncServiceDelegate.migrateVaultToMyItemsCalled)
+        XCTAssertNil(syncServiceDelegate.migrateVaultToMyItemsOrganizationId)
+    }
+
+    /// `checkUserNeedsVaultMigration()` calls delegate when personal vault items exist (including deleted ones).
+    @MainActor
+    func test_checkUserNeedsVaultMigration_hasPersonalVaultItems() async throws {
+        client.result = .httpSuccess(testData: .syncWithCiphers)
+        stateService.activeAccount = .fixture()
+        configService.featureFlagsBool[.migrateMyVaultToMyItems] = true
+        policyService.getEarliestOrganizationApplyingPolicyResult[.personalOwnership] = "org-123"
+        cipherService.hasPersonalCiphersResult = .success(true)
+
+        try await subject.fetchSync(forceSync: false)
+
+        XCTAssertTrue(cipherService.hasPersonalCiphersCalled)
+        XCTAssertTrue(syncServiceDelegate.migrateVaultToMyItemsCalled)
+        XCTAssertEqual(syncServiceDelegate.migrateVaultToMyItemsOrganizationId, "org-123")
+    }
+
+    /// `checkUserNeedsVaultMigration()` calls delegate with correct organization ID when multiple orgs apply policy.
+    @MainActor
+    func test_checkUserNeedsVaultMigration_multipleOrganizations() async throws {
+        client.result = .httpSuccess(testData: .syncWithCiphers)
+        stateService.activeAccount = .fixture()
+        configService.featureFlagsBool[.migrateMyVaultToMyItems] = true
+        // The earliest organization to activate the policy
+        policyService.getEarliestOrganizationApplyingPolicyResult[.personalOwnership] = "earliest-org"
+        cipherService.hasPersonalCiphersResult = .success(true)
+
+        try await subject.fetchSync(forceSync: false)
+
+        XCTAssertTrue(syncServiceDelegate.migrateVaultToMyItemsCalled)
+        XCTAssertEqual(syncServiceDelegate.migrateVaultToMyItemsOrganizationId, "earliest-org")
+    }
+
+    // MARK: - checkVaultTimeoutPolicy Tests
+
+    /// `fetchSync()` only updates the user's timeout action to match the policy's
+    /// if the user's timeout value is less than the policy's.
+    func test_checkVaultTimeoutPolicy_actionOnly() async throws {
+        client.result = .httpSuccess(testData: .syncWithCiphers)
+        stateService.activeAccount = .fixture()
+        userSessionStateService.getVaultTimeoutReturnValue = SessionTimeoutValue(rawValue: 15)
+        policyService.fetchTimeoutPolicyValuesResult = .success(
+            SessionTimeoutPolicy(
+                timeoutAction: .logout,
+                timeoutType: nil,
+                timeoutValue: SessionTimeoutValue(rawValue: 60),
+            ),
+        )
+
+        try await subject.fetchSync(forceSync: false)
+
+        XCTAssertEqual(stateService.timeoutAction["1"], .logout)
+        XCTAssertEqual(userSessionStateService.setVaultTimeoutCallsCount, 0)
+    }
+
+    /// `fetchSync()` updates the user's timeout action and value
+    /// if the user's timeout value is greater than the policy's.
+    func test_checkVaultTimeoutPolicy_actionAndValue() async throws {
+        client.result = .httpSuccess(testData: .syncWithCiphers)
+        stateService.activeAccount = .fixture()
+        userSessionStateService.getVaultTimeoutReturnValue = SessionTimeoutValue(rawValue: 120)
+
+        policyService.fetchTimeoutPolicyValuesResult = .success(
+            SessionTimeoutPolicy(
+                timeoutAction: .logout,
+                timeoutType: nil,
+                timeoutValue: SessionTimeoutValue(rawValue: 60),
+            ),
+        )
+
+        try await subject.fetchSync(forceSync: false)
+
+        XCTAssertEqual(stateService.timeoutAction["1"], .logout)
+        XCTAssertEqual(
+            userSessionStateService.setVaultTimeoutReceivedArguments?.value,
+            SessionTimeoutValue(rawValue: 60),
+        )
+    }
+
+    /// `fetchSync()` updates the user's timeout action and ignores the time value.
+    func test_checkVaultTimeoutPolicy_setActionForOnAppRestartType() async throws {
+        client.result = .httpSuccess(testData: .syncWithCiphers)
+        stateService.activeAccount = .fixture()
+        userSessionStateService.getVaultTimeoutReturnValue = SessionTimeoutValue(rawValue: 120)
+
+        policyService.fetchTimeoutPolicyValuesResult = .success(
+            SessionTimeoutPolicy(
+                timeoutAction: .logout,
+                timeoutType: .onAppRestart,
+                timeoutValue: SessionTimeoutValue(rawValue: 60),
+            ),
+        )
+
+        try await subject.fetchSync(forceSync: false)
+
+        XCTAssertEqual(stateService.timeoutAction["1"], .logout)
+        XCTAssertEqual(
+            userSessionStateService.setVaultTimeoutReceivedArguments?.value,
+            SessionTimeoutValue(rawValue: 120),
+        )
+    }
+
+    /// `fetchSync()` updates the user's timeout action and value - if the timeout value is set to
+    /// never, it is set to the maximum timeout allowed by the policy.
+    func test_checkVaultTimeoutPolicy_valueNever() async throws {
+        client.result = .httpSuccess(testData: .syncWithCiphers)
+        stateService.activeAccount = .fixture()
+        userSessionStateService.getVaultTimeoutReturnValue = .never
+
+        policyService.fetchTimeoutPolicyValuesResult = .success(
+            SessionTimeoutPolicy(
+                timeoutAction: .lock,
+                timeoutType: nil,
+                timeoutValue: SessionTimeoutValue(rawValue: 15),
+            ),
+        )
+
+        try await subject.fetchSync(forceSync: false)
+
+        XCTAssertEqual(stateService.timeoutAction["1"], .lock)
+        XCTAssertEqual(
+            userSessionStateService.setVaultTimeoutReceivedArguments?.value,
+            SessionTimeoutValue.fifteenMinutes,
+        )
+    }
+
+    /// `fetchSync()` performs the sync API request.
+    func test_fetchSync() async throws {
+        client.result = .httpSuccess(testData: .syncWithCiphers)
+        stateService.activeAccount = .fixture()
+
+        try await subject.fetchSync(forceSync: false)
+
+        XCTAssertEqual(client.requests.count, 1)
+        XCTAssertEqual(client.requests[0].method, .get)
+        XCTAssertEqual(client.requests[0].url.absoluteString, "https://example.com/api/sync")
+        XCTAssertEqual(syncServiceDelegate.onFetchSyncSucceededCalledWithuserId, "1")
+
+        try XCTAssertEqual(
+            XCTUnwrap(stateService.lastSyncTimeByUserId["1"]),
+            timeProvider.presentTime,
+        )
+    }
+
+    /// `fetchSync()` calls `syncRules()` on the fill-assist repository independently of vault sync.
+    func test_fetchSync_syncsFillAssistRules() async throws {
+        client.result = .httpSuccess(testData: .syncWithCiphers)
+        stateService.activeAccount = .fixture()
+
+        try await subject.fetchSync(forceSync: false)
+
+        XCTAssertTrue(fillAssistRepository.syncRulesCalled)
+    }
+
+    /// `fetchSync()` calls `syncRules()` even when the vault does not need syncing.
+    func test_fetchSync_syncsFillAssistRules_evenWhenVaultSyncSkipped() async throws {
+        client.result = .httpSuccess(testData: .syncWithCipher)
+        stateService.activeAccount = .fixture()
+        stateService.lastSyncTimeByUserId["1"] = try XCTUnwrap(
+            timeProvider.presentTime.addingTimeInterval(-(Constants.minimumSyncInterval - 1)),
+        )
+        keyConnectorService.userNeedsMigrationResult = .success(false)
+
+        try await subject.fetchSync(forceSync: false, isPeriodic: true)
+
+        XCTAssertTrue(client.requests.isEmpty)
+        XCTAssertTrue(fillAssistRepository.syncRulesCalled)
+    }
+
+    /// `fetchSync()` with `forceSync: true` performs the sync API request regardless of the
+    /// account revision or sync interval.
+    func test_fetchSync_failedParse() async throws {
+        client.results = [
+            .httpSuccess(testData: .accountRevisionDate(timeProvider.presentTime)),
+            .httpSuccess(testData: .syncWithCipher),
+        ]
+        stateService.activeAccount = .fixture()
+        let priorSyncDate = Date(year: 2022, month: 1, day: 1)
+        stateService.lastSyncTimeByUserId["1"] = priorSyncDate
+        cipherService.replaceCiphersError = BitwardenTestError.example
+        keyConnectorService.userNeedsMigrationResult = .success(false)
+
+        await assertAsyncThrows(error: BitwardenTestError.example) {
+            try await subject.fetchSync(forceSync: false)
+        }
+
+        XCTAssertEqual(client.requests.count, 2)
+        XCTAssertNotNil(cipherService.replaceCiphersCiphers)
+
+        try XCTAssertEqual(
+            XCTUnwrap(stateService.lastSyncTimeByUserId["1"]),
+            priorSyncDate,
+        )
+    }
+
+    /// `fetchSync()` with `forceSync: true` performs the sync API request regardless of the
+    /// account revision or sync interval.
+    func test_fetchSync_forceSync() async throws {
+        client.result = .httpSuccess(testData: .syncWithCiphers)
+        stateService.activeAccount = .fixture()
+        stateService.lastSyncTimeByUserId["1"] = timeProvider.presentTime
+
+        try await subject.fetchSync(forceSync: true)
+
+        XCTAssertEqual(client.requests.count, 1)
+        XCTAssertEqual(client.requests[0].method, .get)
+        XCTAssertEqual(client.requests[0].url.absoluteString, "https://example.com/api/sync")
+
+        try XCTAssertEqual(
+            XCTUnwrap(stateService.lastSyncTimeByUserId["1"]),
+            timeProvider.presentTime,
+        )
+    }
+
+    /// `fetchSync()` syncs if the last sync time is greater than 30 minutes ago, is periodic and the account has
+    /// newer revisions.
+    func test_fetchSync_needsSync_lastSyncTime_older30MinsWithRevisions() async throws {
+        client.results = [
+            .httpSuccess(testData: .accountRevisionDate(timeProvider.presentTime)),
+            .httpSuccess(testData: .syncWithCipher),
+        ]
+        stateService.activeAccount = .fixture()
+        let lastSync = timeProvider.presentTime.addingTimeInterval(-(Constants.minimumSyncInterval + 1))
+        stateService.lastSyncTimeByUserId["1"] = try XCTUnwrap(
+            lastSync,
+        )
+        keyConnectorService.userNeedsMigrationResult = .success(false)
+
+        try await subject.fetchSync(forceSync: false, isPeriodic: true)
+
+        XCTAssertEqual(client.requests.count, 2)
+        XCTAssertNotNil(cipherService.replaceCiphersCiphers)
+
+        try XCTAssertEqual(
+            XCTUnwrap(stateService.lastSyncTimeByUserId["1"]),
+            timeProvider.presentTime,
+        )
+    }
+
+    /// `fetchSync()` doesn't sync if the last sync time is greater than 30 minutes, is periodic but fetching
+    /// the account revision date fails.
+    func test_fetchSync_needsSync_lastSyncTime_older30Mins_revisionsError() async throws {
+        let lastSyncTime = try XCTUnwrap(
+            timeProvider.presentTime.addingTimeInterval(-(Constants.minimumSyncInterval + 1)),
+        )
+        client.result = .httpFailure(BitwardenTestError.example)
+        stateService.activeAccount = .fixture()
+        stateService.lastSyncTimeByUserId["1"] = lastSyncTime
+        keyConnectorService.userNeedsMigrationResult = .success(false)
+
+        try await subject.fetchSync(forceSync: false, isPeriodic: true)
+
+        XCTAssertEqual(client.requests.count, 1)
+        XCTAssertNil(cipherService.replaceCiphersCiphers)
+
+        XCTAssertEqual(stateService.lastSyncTimeByUserId["1"], lastSyncTime)
+    }
+
+    /// `fetchSync()` doesn't syncs if the last sync time is greater than 30 minutes ago, is periodic but the
+    /// account doesn't have newer revisions.
+    func test_fetchSync_needsSync_lastSyncTime_older30MinsWithoutRevisions() async throws {
+        let lastRevision = try XCTUnwrap(timeProvider.presentTime.addingTimeInterval(-24 * 60 * 60))
+        client.results = [
+            .httpSuccess(testData: .accountRevisionDate(lastRevision)),
+            .httpSuccess(testData: .syncWithCipher),
+        ]
+        stateService.activeAccount = .fixture()
+        let lastSync = timeProvider.presentTime.addingTimeInterval(-(Constants.minimumSyncInterval + 60))
+        stateService.lastSyncTimeByUserId["1"] = try XCTUnwrap(
+            lastSync,
+        )
+        keyConnectorService.userNeedsMigrationResult = .success(false)
+
+        try await subject.fetchSync(forceSync: false, isPeriodic: true)
+
+        XCTAssertEqual(client.requests.count, 1)
+        XCTAssertNil(cipherService.replaceCiphersCiphers)
+
+        try XCTAssertEqual(
+            XCTUnwrap(stateService.lastSyncTimeByUserId["1"]),
+            timeProvider.presentTime,
+        )
+    }
+
+    /// `fetchSync()` doesn't sync if the last sync time is within the last 30 minutes and is periodic.
+    func test_fetchSync_needsSync_lastSyncTime_newer30Mins() async throws {
+        client.result = .httpSuccess(testData: .syncWithCipher)
+        stateService.activeAccount = .fixture()
+        stateService.lastSyncTimeByUserId["1"] = try XCTUnwrap(
+            timeProvider.presentTime.addingTimeInterval(-(Constants.minimumSyncInterval - 1)),
+        )
+        keyConnectorService.userNeedsMigrationResult = .success(false)
+
+        try await subject.fetchSync(forceSync: false, isPeriodic: true)
+
+        XCTAssertTrue(client.requests.isEmpty)
+        XCTAssertNil(cipherService.replaceCiphersCiphers)
+    }
+
+    /// `fetchSync()` syncs if the last sync time is not greater than 30 minutes ago, is not periodic
+    /// and the account has newer revisions.
+    func test_fetchSync_notPeriodicNotOlder30MinsWithRevisions() async throws {
+        client.results = [
+            .httpSuccess(testData: .accountRevisionDate(timeProvider.presentTime)),
+            .httpSuccess(testData: .syncWithCipher),
+        ]
+        stateService.activeAccount = .fixture()
+        let lastSync = timeProvider.presentTime.addingTimeInterval(-(Constants.minimumSyncInterval - 1))
+        stateService.lastSyncTimeByUserId["1"] = try XCTUnwrap(
+            lastSync,
+        )
+        keyConnectorService.userNeedsMigrationResult = .success(false)
+
+        try await subject.fetchSync(forceSync: false, isPeriodic: false)
+
+        XCTAssertEqual(client.requests.count, 2)
+        XCTAssertNotNil(cipherService.replaceCiphersCiphers)
+
+        try XCTAssertEqual(
+            XCTUnwrap(stateService.lastSyncTimeByUserId["1"]),
+            timeProvider.presentTime,
+        )
+    }
+
+    // MARK: Monotonic Time Tests
+
+    /// `fetchSync()` doesn't sync if monotonic time shows interval hasn't passed.
+    @MainActor
+    func test_fetchSync_monotonicTime_blocksEarlySyncAttempt() async throws {
+        client.result = .httpSuccess(testData: .syncWithCipher)
+        stateService.activeAccount = .fixture()
+
+        stateService.lastSyncTimeByUserId["1"] = timeProvider.presentTime.addingTimeInterval(-1800)
+        stateService.lastSyncMonotonicTimeByUserId["1"] = 1000.0
+        timeProvider.timeConfig = .mockTime(.now, 1800.0) // Only 800 seconds elapsed (< 30 min)
+
+        // calculateTamperResistantElapsedTime shows 800 seconds elapsed, below 30 min threshold
+        timeProvider.calculateTamperResistantElapsedTimeResult = TamperResistantTimeResult(
+            divergence: 0,
+            effectiveElapsed: 800,
+            elapsedMonotonic: 800,
+            elapsedWallClock: 800,
+            isReboot: false,
+            tamperingDetected: false,
+        )
+
+        keyConnectorService.userNeedsMigrationResult = .success(false)
+
+        try await subject.fetchSync(forceSync: false, isPeriodic: true)
+
+        XCTAssertTrue(client.requests.isEmpty)
+    }
+
+    /// `fetchSync()` syncs if monotonic time shows interval has passed.
+    func test_fetchSync_monotonicTime_allowsSyncAfterInterval() async throws {
+        client.results = [
+            .httpSuccess(testData: .accountRevisionDate(timeProvider.presentTime)),
+            .httpSuccess(testData: .syncWithCipher),
+        ]
+        stateService.activeAccount = .fixture()
+
+        stateService.lastSyncTimeByUserId["1"] = timeProvider.presentTime.addingTimeInterval(-1800)
+        stateService.lastSyncMonotonicTimeByUserId["1"] = 1000.0
+        timeProvider.timeConfig = .mockTime(.now, 2801.0) // 1801 seconds elapsed (> 30 min)
+
+        // calculateTamperResistantElapsedTime shows 1801 seconds elapsed, above 30 min threshold
+        timeProvider.calculateTamperResistantElapsedTimeResult = TamperResistantTimeResult(
+            divergence: 0,
+            effectiveElapsed: 1801,
+            elapsedMonotonic: 1801,
+            elapsedWallClock: 1801,
+            isReboot: false,
+            tamperingDetected: false,
+        )
+
+        keyConnectorService.userNeedsMigrationResult = .success(false)
+
+        try await subject.fetchSync(forceSync: false, isPeriodic: true)
+
+        XCTAssertEqual(client.requests.count, 2)
+        XCTAssertNotNil(cipherService.replaceCiphersCiphers)
+    }
+
+    /// `fetchSync()` forces sync when device reboot is detected.
+    func test_fetchSync_monotonicTime_forceSyncAfterReboot() async throws {
+        client.result = .httpSuccess(testData: .syncWithCipher)
+        stateService.activeAccount = .fixture()
+
+        stateService.lastSyncTimeByUserId["1"] = timeProvider.presentTime.addingTimeInterval(-1800)
+        stateService.lastSyncMonotonicTimeByUserId["1"] = 10000.0
+        timeProvider.timeConfig = .mockTime(.now, 100.0) // Negative elapsed (reboot)
+
+        // calculateTamperResistantElapsedTime detects tampering (reboot detected)
+        timeProvider.calculateTamperResistantElapsedTimeResult = TamperResistantTimeResult(
+            divergence: 11700,
+            effectiveElapsed: 1800,
+            elapsedMonotonic: -9900,
+            elapsedWallClock: 1800,
+            isReboot: false,
+            tamperingDetected: true,
+        )
+
+        keyConnectorService.userNeedsMigrationResult = .success(false)
+
+        try await subject.fetchSync(forceSync: false, isPeriodic: true)
+
+        XCTAssertEqual(client.requests.count, 1)
+    }
+
+    /// `fetchSync()` falls back to wall-clock when monotonic time unavailable (migration).
+    @MainActor
+    func test_fetchSync_monotonicTime_fallbackToWallClockOnMigration() async throws {
+        client.result = .httpSuccess(testData: .syncWithCipher)
+        stateService.activeAccount = .fixture()
+
+        stateService.lastSyncTimeByUserId["1"] = timeProvider.presentTime.addingTimeInterval(-1700)
+        stateService.lastSyncMonotonicTimeByUserId["1"] = nil // Migration case
+
+        keyConnectorService.userNeedsMigrationResult = .success(false)
+
+        try await subject.fetchSync(forceSync: false, isPeriodic: true)
+
+        XCTAssertTrue(client.requests.isEmpty) // Wall-clock fallback blocks
+    }
+
+    /// `fetchSync()` protects against clock manipulation using monotonic time.
+    func test_fetchSync_monotonicTime_protectsAgainstClockAttack() async throws {
+        client.result = .httpSuccess(testData: .syncWithCipher)
+        stateService.activeAccount = .fixture()
+
+        // User sets clock back 1 hour
+        let manipulatedTime = timeProvider.presentTime.addingTimeInterval(-3600)
+        stateService.lastSyncTimeByUserId["1"] = manipulatedTime
+        stateService.lastSyncMonotonicTimeByUserId["1"] = 1000.0
+        timeProvider.timeConfig = .mockTime(.now, 1600.0) // Only 10 min monotonic elapsed
+
+        // calculateTamperResistantElapsedTime shows only 600 seconds (10 min) elapsed
+        // Wall-clock shows 3600s but monotonic time shows only 600s
+        timeProvider.calculateTamperResistantElapsedTimeResult = TamperResistantTimeResult(
+            divergence: 3000,
+            effectiveElapsed: 600,
+            elapsedMonotonic: 600,
+            elapsedWallClock: 3600,
+            isReboot: false,
+            tamperingDetected: false,
+        )
+
+        keyConnectorService.userNeedsMigrationResult = .success(false)
+
+        try await subject.fetchSync(forceSync: false, isPeriodic: true)
+
+        XCTAssertTrue(client.requests.isEmpty) // Attack blocked
+    }
+
+    /// `fetchSync()` forces sync when clock manipulation with large divergence is detected.
+    func test_fetchSync_monotonicTime_forcesSyncOnClockManipulationDetection() async throws {
+        client.result = .httpSuccess(testData: .syncWithCipher)
+        stateService.activeAccount = .fixture()
+
+        // Clock divergence detected
+        stateService.lastSyncTimeByUserId["1"] = timeProvider.presentTime.addingTimeInterval(-600)
+        stateService.lastSyncMonotonicTimeByUserId["1"] = 1000.0
+        timeProvider.timeConfig = .mockTime(.now, 1300.0)
+
+        // calculateTamperResistantElapsedTime detects tampering (large clock divergence)
+        timeProvider.calculateTamperResistantElapsedTimeResult = TamperResistantTimeResult(
+            divergence: 300,
+            effectiveElapsed: 300,
+            elapsedMonotonic: 300,
+            elapsedWallClock: 600,
+            isReboot: false,
+            tamperingDetected: true,
+        )
+
+        keyConnectorService.userNeedsMigrationResult = .success(false)
+
+        try await subject.fetchSync(forceSync: false, isPeriodic: true)
+
+        XCTAssertEqual(client.requests.count, 1) // Sync forced due to tampering detection
+    }
+
+    /// `fetchSync()` updates monotonic time after successful sync.
+    func test_fetchSync_updatesMonotonicTimeAfterSync() async throws {
+        client.result = .httpSuccess(testData: .syncWithCipher)
+        stateService.activeAccount = .fixture()
+
+        timeProvider.timeConfig = .mockTime(.now, 5000.0)
+
+        try await subject.fetchSync(forceSync: false)
+
+        try XCTAssertEqual(
+            XCTUnwrap(stateService.lastSyncMonotonicTimeByUserId["1"]),
+            5000.0,
+        )
+    }
+
+    /// `fetchSync()` syncs if there's no existing last sync time.
+    func test_fetchSync_needsSync_noLastSyncTime() async throws {
+        client.result = .httpSuccess(testData: .syncWithCipher)
+        stateService.activeAccount = .fixture()
+
+        try await subject.fetchSync(forceSync: false)
+
+        XCTAssertFalse(client.requests.isEmpty)
+        XCTAssertNotNil(cipherService.replaceCiphersCiphers)
+    }
+
+    /// `fetchSync()` replaces the list of the user's ciphers.
+    func test_fetchSync_ciphers() async throws {
+        client.result = .httpSuccess(testData: .syncWithCipher)
+        stateService.activeAccount = .fixture()
+
+        try await subject.fetchSync(forceSync: false)
+
+        let date = Date(year: 2023, month: 8, day: 10, hour: 8, minute: 33, second: 45, nanosecond: 345_000_000)
+        XCTAssertEqual(
+            cipherService.replaceCiphersCiphers,
+            [
+                CipherDetailsResponseModel.fixture(
+                    creationDate: date,
+                    edit: true,
+                    id: "3792af7a-4441-11ee-be56-0242ac120002",
+                    login: .fixture(
+                        fido2Credentials: [
+                            CipherLoginFido2Credential(
+                                counter: "encrypted counter",
+                                creationDate: Date(timeIntervalSince1970: 1_710_523_862.244),
+                                credentialId: "encrypted credentialId",
+                                discoverable: "encrypted discoverable",
+                                keyAlgorithm: "encrypted keyAlgorithm",
+                                keyCurve: "encrypted keyCurve",
+                                keyType: "encrypted keyType",
+                                keyValue: "encrypted keyValue",
+                                rpId: "encrypted rpId",
+                                rpName: "encrypted rpName",
+                                userDisplayName: "encrypted userDisplayName",
+                                userHandle: "encrypted userHandle",
+                                userName: "encrypted userName",
+                            ),
+                        ],
+                        password: "encrypted password",
+                        totp: "totp",
+                        uris: [
+                            CipherLoginUriModel(
+                                match: nil,
+                                uri: "encrypted uri",
+                                uriChecksum: "encrypted uri checksum",
+                            ),
+                        ],
+                        username: "encrypted username",
+                    ),
+                    name: "encrypted name",
+                    revisionDate: date,
+                    type: .login,
+                    viewPassword: true,
+                ),
+            ],
+        )
+        XCTAssertEqual(cipherService.replaceCiphersUserId, "1")
+    }
+
+    /// `fetchSync()` replaces the list of the user's collections.
+    func test_fetchSync_collections() async throws {
+        client.result = .httpSuccess(testData: .syncWithCiphersCollections)
+        stateService.activeAccount = .fixture()
+
+        try await subject.fetchSync(forceSync: false)
+
+        XCTAssertEqual(
+            collectionService.replaceCollectionsCollections,
+            [
+                CollectionDetailsResponseModel.fixture(
+                    id: "f96de98e-618a-4886-b396-66b92a385325",
+                    name: "Engineering",
+                    organizationId: "ba756e34-4650-4e8a-8cbb-6e98bfae9abf",
+                ),
+                CollectionDetailsResponseModel.fixture(
+                    id: "1a102336-fbfd-4d63-bd7b-8a953a1bcdb3",
+                    name: "Engineering/Apple",
+                    organizationId: "ba756e34-4650-4e8a-8cbb-6e98bfae9abf",
+                ),
+                CollectionDetailsResponseModel.fixture(
+                    id: "a468e453-7141-49cf-bb15-58448c2b27b9",
+                    name: "Design",
+                    organizationId: "ba756e34-4650-4e8a-8cbb-6e98bfae9abf",
+                ),
+                CollectionDetailsResponseModel.fixture(
+                    id: "bf4df591-e8e4-4dc1-837c-40ced4405bf5",
+                    name: "Design",
+                    organizationId: "ba756e34-4650-4e8a-8cbb-6e98bfae9abf",
+                    defaultUserCollectionEmail: nil,
+                    type: CollectionType.sharedCollection,
+                ),
+            ],
+        )
+        XCTAssertEqual(collectionService.replaceCollectionsUserId, "1")
+    }
+
+    /// `fetchSync()` check if absent optional properties are initialized correctly.
+    func test_fetcSync_collections_optionalPropertiesAbsent() async throws {
+        client.result = .httpSuccess(testData: .syncWithCiphersCollections)
+        stateService.activeAccount = .fixture()
+
+        try await subject.fetchSync(forceSync: false)
+
+        let parsedCollection = try XCTUnwrap(
+            collectionService.replaceCollectionsCollections?.first(
+                where: { $0.id == "a468e453-7141-49cf-bb15-58448c2b27b9" },
+            ),
+        )
+
+        XCTAssertEqual(
+            parsedCollection,
+            CollectionDetailsResponseModel.fixture(
+                id: "a468e453-7141-49cf-bb15-58448c2b27b9",
+                name: "Design",
+                organizationId: "ba756e34-4650-4e8a-8cbb-6e98bfae9abf",
+                defaultUserCollectionEmail: nil,
+                type: CollectionType.sharedCollection,
+            ),
+        )
+    }
+
+    /// `fetchSync()` check if optional properties are initialized correctly.
+    func test_fetcSync_collections_optionalPropertiesPresent() async throws {
+        client.result = .httpSuccess(testData: .syncWithCiphersCollections)
+        stateService.activeAccount = .fixture()
+
+        try await subject.fetchSync(forceSync: false)
+
+        let parsedCollection = try XCTUnwrap(
+            collectionService.replaceCollectionsCollections?.first(
+                where: { $0.id == "bf4df591-e8e4-4dc1-837c-40ced4405bf5" },
+            ),
+        )
+
+        XCTAssertEqual(
+            parsedCollection,
+            CollectionDetailsResponseModel.fixture(
+                id: "bf4df591-e8e4-4dc1-837c-40ced4405bf5",
+                name: "Design",
+                organizationId: "ba756e34-4650-4e8a-8cbb-6e98bfae9abf",
+                defaultUserCollectionEmail: nil,
+                type: CollectionType.sharedCollection,
+            ),
+        )
+    }
+
+    /// `fetchSync()` updates the user's profile.
+    func test_fetchSync_profile() async throws {
+        client.result = .httpSuccess(testData: .syncWithProfile)
+        stateService.activeAccount = .fixture()
+
+        try await subject.fetchSync(forceSync: false)
+
+        XCTAssertEqual(
+            stateService.updateProfileResponse,
+            .fixture(
+                culture: "en-US",
+                email: "user@bitwarden.com",
+                id: "c8aa1e36-4427-11ee-be56-0242ac120002",
+                key: "key",
+                organizations: [],
+                privateKey: "private key",
+                providerOrganizations: [],
+                securityStamp: "stamp",
+            ),
+        )
+        XCTAssertEqual(stateService.updateProfileUserId, "1")
+        XCTAssertEqual(stateService.usesKeyConnector["1"], false)
+        XCTAssertEqual(
+            stateService.accountEncryptionKeys["1"],
+            AccountEncryptionKeys(
+                cryptographicState: .v1(privateKey: "private key"),
+                encryptedUserKey: "key",
+            ),
+        )
+    }
+
+    /// `fetchSync()` updates the user's profile when it has account keys.
+    func test_fetchSync_profileWithAccountKeys() async throws {
+        client.result = .httpSuccess(testData: .syncWithAccountKeysV2Profile)
+        stateService.activeAccount = .fixture()
+
+        try await subject.fetchSync(forceSync: false)
+
+        XCTAssertEqual(
+            stateService.updateProfileResponse,
+            .fixture(
+                accountKeys: .fixtureFilled(),
+                culture: "en-US",
+                email: "user@bitwarden.com",
+                id: "c8aa1e36-4427-11ee-be56-0242ac120002",
+                key: "key",
+                organizations: [],
+                privateKey: "private key",
+                providerOrganizations: [],
+                securityStamp: "stamp",
+            ),
+        )
+        XCTAssertEqual(stateService.updateProfileUserId, "1")
+        XCTAssertEqual(stateService.usesKeyConnector["1"], false)
+        XCTAssertEqual(
+            stateService.accountEncryptionKeys["1"],
+            AccountEncryptionKeys(
+                cryptographicState: .fixtureV2(),
+                encryptedUserKey: "key",
+            ),
+        )
+    }
+
+    /// `fetchSync()` notifies the sync service delegate if the user needs to be migrated to Key
+    /// Connector.
+    func test_fetchSync_removeMasterPassword() async throws {
+        client.result = .httpSuccess(testData: .syncWithProfile)
+        keyConnectorService.getManagingOrganizationResult = .success(
+            .fixture(keyConnectorUrl: "htttp://example.com/", name: "Example Org"),
+        )
+        keyConnectorService.userNeedsMigrationResult = .success(true)
+        stateService.activeAccount = .fixture()
+
+        try await subject.fetchSync(forceSync: false)
+
+        XCTAssertTrue(syncServiceDelegate.removeMasterPasswordCalled)
+        XCTAssertEqual(syncServiceDelegate.removeMasterPasswordOrganizationName, "Example Org")
+        XCTAssertEqual(syncServiceDelegate.removeMasterPasswordKeyConnectorUrl, "htttp://example.com/")
+    }
+
+    /// `fetchSync()` throws an error if checking if the user needs to be migrated fails.
+    func test_fetchSync_removeMasterPassword_failure() async throws {
+        client.result = .httpSuccess(testData: .syncWithProfile)
+        keyConnectorService.userNeedsMigrationResult = .failure(BitwardenTestError.example)
+        stateService.activeAccount = .fixture()
+
+        await assertAsyncThrows(error: BitwardenTestError.example) {
+            try await subject.fetchSync(forceSync: false)
+        }
+
+        XCTAssertFalse(syncServiceDelegate.removeMasterPasswordCalled)
+    }
+
+    /// `fetchSync()` notifies the sync service delegate if the security stamp changes and doesn't
+    /// replace any of the user's data.
+    func test_fetchSync_securityStampChanged() async throws {
+        client.result = .httpSuccess(testData: .syncWithProfile)
+        stateService.activeAccount = .fixture(profile: .fixture(stamp: "old stamp"))
+
+        try await subject.fetchSync(forceSync: false)
+
+        XCTAssertTrue(syncServiceDelegate.securityStampChangedCalled)
+        XCTAssertEqual(syncServiceDelegate.securityStampChangedUserId, "1")
+        XCTAssertNil(stateService.updateProfileResponse)
+    }
+
+    /// `fetchSync()` does not notify the sync service delegate if the security stamp is the same
+    /// and syncs the user's data.
+    func test_fetchSync_securityStampSame() async throws {
+        client.result = .httpSuccess(testData: .syncWithProfile)
+        stateService.activeAccount = .fixture(profile: .fixture(stamp: "stamp"))
+
+        try await subject.fetchSync(forceSync: false)
+
+        XCTAssertFalse(syncServiceDelegate.securityStampChangedCalled)
+        XCTAssertNotNil(stateService.updateProfileResponse)
+    }
+
+    /// `fetchSync()` replaces the list of the user's sends.
+    func test_fetchSync_sends() async throws {
+        client.result = .httpSuccess(testData: .syncWithSends)
+        stateService.activeAccount = .fixture()
+
+        try await subject.fetchSync(forceSync: false)
+
+        XCTAssertEqual(
+            sendService.replaceSendsSends,
+            [
+                SendResponseModel.fixture(
+                    accessId: "access id",
+                    deletionDate: Date(timeIntervalSince1970: 1_691_443_980),
+                    id: "fc483c22-443c-11ee-be56-0242ac120002",
+                    key: "encrypted key",
+                    name: "encrypted name",
+                    revisionDate: Date(timeIntervalSince1970: 1_690_925_611.636),
+                    text: SendTextModel(
+                        hidden: false,
+                        text: "encrypted text",
+                    ),
+                    type: .text,
+                ),
+                SendResponseModel.fixture(
+                    accessId: "access id",
+                    deletionDate: Date(timeIntervalSince1970: 1_692_230_400),
+                    file: SendFileModel(
+                        fileName: "test.txt",
+                        id: "1",
+                        size: "123",
+                        sizeName: "123 KB",
+                    ),
+                    id: "d7a7e48c-443f-11ee-be56-0242ac120002",
+                    key: "encrypted key",
+                    name: "encrypted name",
+                    revisionDate: Date(timeIntervalSince1970: 1_691_625_600),
+                    type: .file,
+                ),
+            ],
+        )
+        XCTAssertEqual(sendService.replaceSendsUserId, "1")
+    }
+
+    /// `fetchSync()` replaces the list of the user's equivalent domains.
+    func test_fetchSync_domains() async throws {
+        client.result = .httpSuccess(testData: .syncWithDomains)
+        stateService.activeAccount = .fixture()
+
+        try await subject.fetchSync(forceSync: false)
+
+        XCTAssertEqual(
+            settingsService.replaceEquivalentDomainsDomains,
+            DomainsResponseModel(
+                equivalentDomains: [["example.com", "test.com"]],
+                globalEquivalentDomains: [
+                    GlobalDomains(domains: ["apple.com", "icloud.com"], excluded: false, type: 1),
+                ],
+            ),
+        )
+    }
+
+    /// `fetchSync()` replaces the list of the user's folders.
+    func test_fetchSync_folders() async throws {
+        client.result = .httpSuccess(testData: .syncWithCiphers)
+        stateService.activeAccount = .fixture()
+
+        try await subject.fetchSync(forceSync: false)
+
+        XCTAssertEqual(
+            folderService.replaceFoldersFolders,
+            [
+                FolderResponseModel(
+                    id: "3270afb7-e3d7-495a-8867-c66cf272f795",
+                    name: "Social",
+                    revisionDate: Date(year: 2023, month: 10, day: 9, hour: 3, minute: 44, second: 59),
+                ),
+            ],
+        )
+        XCTAssertEqual(folderService.replaceFoldersUserId, "1")
+    }
+
+    /// `fetchSync()` replaces the list of the user's organizations.
+    func test_fetchSync_organizations() async throws {
+        client.result = .httpSuccess(testData: .syncWithProfileOrganizations)
+        stateService.activeAccount = .fixture()
+
+        try await subject.fetchSync(forceSync: false)
+
+        XCTAssertTrue(organizationService.initializeOrganizationCryptoWithOrgsCalled)
+        XCTAssertEqual(organizationService.replaceOrganizationsOrganizations?.count, 2)
+        XCTAssertEqual(organizationService.replaceOrganizationsOrganizations?[0].id, "ORG_1")
+        XCTAssertEqual(organizationService.replaceOrganizationsOrganizations?[1].id, "ORG_2")
+        XCTAssertEqual(organizationService.replaceOrganizationsUserId, "1")
+    }
+
+    /// `fetchSync()` replaces the list of the user's organizations but doesn't initialize
+    /// organization crypto if the user's vault is locked.
+    @MainActor
+    func test_fetchSync_organizations_vaultLocked() async throws {
+        client.result = .httpSuccess(testData: .syncWithProfileOrganizations)
+        stateService.activeAccount = .fixture()
+        vaultTimeoutService.isClientLocked["1"] = true
+
+        try await subject.fetchSync(forceSync: false)
+
+        XCTAssertFalse(organizationService.initializeOrganizationCryptoWithOrgsCalled)
+        XCTAssertEqual(organizationService.replaceOrganizationsOrganizations?.count, 2)
+        XCTAssertEqual(organizationService.replaceOrganizationsOrganizations?[0].id, "ORG_1")
+        XCTAssertEqual(organizationService.replaceOrganizationsOrganizations?[1].id, "ORG_2")
+        XCTAssertEqual(organizationService.replaceOrganizationsUserId, "1")
+    }
+
+    /// `fetchSync()` replaces the list of the user's policies.
+    func test_fetchSync_polices() async throws {
+        client.result = .httpSuccess(testData: .syncWithPolicies)
+        stateService.activeAccount = .fixture()
+
+        try await subject.fetchSync(forceSync: false)
+
+        XCTAssertEqual(policyService.replacePoliciesPolicies.count, 4)
+        XCTAssertEqual(
+            policyService.replacePoliciesPolicies[0],
+            .fixture(enabled: false, id: "policy-0", organizationId: "org-1", type: .twoFactorAuthentication),
+        )
+        XCTAssertEqual(
+            policyService.replacePoliciesPolicies[1],
+            .fixture(
+                data: [
+                    "minComplexity": .null,
+                    "minLength": .int(12),
+                    "requireUpper": .bool(true),
+                    "requireLower": .bool(true),
+                    "requireNumbers": .bool(true),
+                    "requireSpecial": .bool(false),
+                    "enforceOnLogin": .bool(false),
+                ],
+                enabled: true,
+                id: "policy-1",
+                organizationId: "org-1",
+                type: .masterPassword,
+            ),
+        )
+        XCTAssertEqual(
+            policyService.replacePoliciesPolicies[2],
+            .fixture(
+                enabled: false,
+                id: "policy-3",
+                organizationId: "org-1",
+                revisionDate: nil,
+                type: .onlyOrg,
+            ),
+        )
+        XCTAssertEqual(
+            policyService.replacePoliciesPolicies[3],
+            .fixture(
+                data: ["autoEnrollEnabled": .bool(false)],
+                enabled: true,
+                id: "policy-8",
+                organizationId: "org-1",
+                revisionDate: nil,
+                type: .resetPassword,
+            ),
+        )
+        XCTAssertEqual(policyService.replacePoliciesUserId, "1")
+    }
+
+    /// `fetchSync()` updates the user's master password unlock decryption options.
+    func test_fetchSync_userDecryptionOptions() async throws {
+        client.result = .httpSuccess(testData: .syncWithUserDecryption)
+        stateService.activeAccount = .fixture()
+
+        try await subject.fetchSync(forceSync: false)
+
+        XCTAssertEqual(
+            stateService.masterPasswordUnlockByUserId["1"],
+            MasterPasswordUnlockResponseModel(
+                kdf: KdfConfig(kdfType: .pbkdf2sha256, iterations: 600_000),
+                masterKeyEncryptedUserKey: "MASTER_KEY_ENCRYPTED_USER_KEY",
+                salt: "user@bitwarden.com",
+            ),
+        )
+    }
+
+    /// `fetchSync()` throws an error if the request fails.
+    func test_fetchSync_error() async throws {
+        client.result = .httpFailure()
+        stateService.activeAccount = .fixture()
+
+        await assertAsyncThrows {
+            try await subject.fetchSync(forceSync: false)
+        }
+        XCTAssertNil(syncServiceDelegate.onFetchSyncSucceededCalledWithuserId)
+    }
+
+    func test_deleteCipher() async throws {
+        stateService.activeAccount = .fixture()
+        cipherService.deleteCipherWithLocalStorageResult = .success(())
+
+        let notification = SyncCipherNotification(
+            collectionIds: nil,
+            id: "id",
+            organizationId: nil,
+            revisionDate: nil,
+            userId: "1",
+        )
+        try await subject.deleteCipher(data: notification)
+        XCTAssertEqual(cipherService.deleteCipherWithLocalStorageId, "id")
+    }
+
+    func test_deleteFolder() async throws {
+        stateService.activeAccount = .fixture()
+        folderService.deleteFolderWithLocalStorageResult = .success(())
+        cipherService.fetchAllCiphersResult = .success([
+            .fixture(folderId: "id", id: "1"),
+            .fixture(folderId: "other", id: "2"),
+        ])
+        cipherService.updateCipherWithLocalStorageResult = .success(())
+
+        let notification = SyncFolderNotification(
+            id: "id",
+            revisionDate: nil,
+            userId: "1",
+        )
+        try await subject.deleteFolder(data: notification)
+        XCTAssertEqual(folderService.deleteFolderWithLocalStorageId, "id")
+        XCTAssertEqual(
+            cipherService.updateCipherWithLocalStorageCiphers,
+            [.fixture(folderId: nil, id: "1")],
+        )
+    }
+
+    func test_deleteSend() async throws {
+        stateService.activeAccount = .fixture()
+        sendService.deleteSendWithLocalStorageResult = .success(())
+
+        let notification = SyncSendNotification(
+            id: "id",
+            revisionDate: nil,
+            userId: "1",
+        )
+        try await subject.deleteSend(data: notification)
+        XCTAssertEqual(sendService.deleteSendWithLocalStorageId, "id")
+    }
+
+    func test_fetchUpsertSyncCipher() async throws {
+        stateService.activeAccount = .fixture()
+        cipherService.syncCipherWithServerResult = .success(())
+
+        let notification = SyncCipherNotification(
+            collectionIds: nil,
+            id: "id",
+            organizationId: nil,
+            revisionDate: nil,
+            userId: "1",
+        )
+        try await subject.fetchUpsertSyncCipher(data: notification)
+        XCTAssertEqual(cipherService.syncCipherWithServerId, "id")
+    }
+
+    func test_fetchUpsertSyncFolder() async throws {
+        stateService.activeAccount = .fixture()
+        folderService.syncFolderWithServerResult = .success(())
+
+        let notification = SyncFolderNotification(
+            id: "id",
+            revisionDate: nil,
+            userId: "1",
+        )
+        try await subject.fetchUpsertSyncFolder(data: notification)
+        XCTAssertEqual(folderService.syncFolderWithServerId, "id")
+    }
+
+    func test_fetchUpsertSyncSend() async throws {
+        stateService.activeAccount = .fixture()
+        sendService.syncSendWithServerResult = .success(())
+
+        let notification = SyncSendNotification(
+            id: "id",
+            revisionDate: nil,
+            userId: "1",
+        )
+        try await subject.fetchUpsertSyncSend(data: notification)
+        XCTAssertEqual(sendService.syncSendWithServerId, "id")
+    }
+
+    /// `needsSync(forceSync:onlyCheckLocalData:userId:)` returns `true` when
+    /// only checking local data and not enough time hasn't passed since the last sync.
+    func test_needsSync_onlyCheckLocalData() async throws {
+        stateService.activeAccount = .fixture()
+        let lastSync = timeProvider.presentTime.addingTimeInterval(-(Constants.minimumSyncInterval + 1))
+        stateService.lastSyncTimeByUserId["1"] = try XCTUnwrap(
+            lastSync,
+        )
+        let needsSync = try await subject.needsSync(for: "1", onlyCheckLocalData: true)
+        XCTAssertTrue(needsSync)
+        XCTAssertTrue(client.requests.isEmpty)
+    }
+
+    // MARK: - organizationIdRequiringVaultMigration Tests
+
+    /// `organizationIdRequiringVaultMigration()` returns `nil` when the feature flag is disabled.
+    @MainActor
+    func test_organizationIdRequiringVaultMigration_featureFlagDisabled() async throws {
+        configService.featureFlagsBool[.migrateMyVaultToMyItems] = false
+        policyService.getEarliestOrganizationApplyingPolicyResult[.personalOwnership] = "org-123"
+        cipherService.hasPersonalCiphersResult = .success(true)
+
+        let result = try await subject.organizationIdRequiringVaultMigration()
+
+        XCTAssertNil(result)
+        XCTAssertFalse(cipherService.hasPersonalCiphersCalled)
+    }
+
+    /// `organizationIdRequiringVaultMigration()` returns the organization ID when all conditions are met.
+    @MainActor
+    func test_organizationIdRequiringVaultMigration_hasPersonalVaultItems() async throws {
+        configService.featureFlagsBool[.migrateMyVaultToMyItems] = true
+        policyService.getEarliestOrganizationApplyingPolicyResult[.personalOwnership] = "org-123"
+        cipherService.hasPersonalCiphersResult = .success(true)
+
+        let result = try await subject.organizationIdRequiringVaultMigration()
+
+        XCTAssertEqual(result, "org-123")
+        XCTAssertTrue(cipherService.hasPersonalCiphersCalled)
+    }
+
+    /// `organizationIdRequiringVaultMigration()` throws when `hasPersonalCiphers()` throws.
+    @MainActor
+    func test_organizationIdRequiringVaultMigration_hasPersonalCiphersThrows() async throws {
+        configService.featureFlagsBool[.migrateMyVaultToMyItems] = true
+        policyService.getEarliestOrganizationApplyingPolicyResult[.personalOwnership] = "org-123"
+        cipherService.hasPersonalCiphersResult = .failure(BitwardenTestError.example)
+
+        await assertAsyncThrows(error: BitwardenTestError.example) {
+            _ = try await subject.organizationIdRequiringVaultMigration()
+        }
+    }
+
+    /// `organizationIdRequiringVaultMigration()` returns `nil` when no organization applies the policy.
+    @MainActor
+    func test_organizationIdRequiringVaultMigration_noOrganizationAppliesPolicy() async throws {
+        configService.featureFlagsBool[.migrateMyVaultToMyItems] = true
+        policyService.getEarliestOrganizationApplyingPolicyResult[.personalOwnership] = nil
+        cipherService.hasPersonalCiphersResult = .success(true)
+
+        let result = try await subject.organizationIdRequiringVaultMigration()
+
+        XCTAssertNil(result)
+        XCTAssertFalse(cipherService.hasPersonalCiphersCalled)
+    }
+
+    /// `organizationIdRequiringVaultMigration()` returns `nil` when user has no personal vault items.
+    @MainActor
+    func test_organizationIdRequiringVaultMigration_noPersonalVaultItems() async throws {
+        configService.featureFlagsBool[.migrateMyVaultToMyItems] = true
+        policyService.getEarliestOrganizationApplyingPolicyResult[.personalOwnership] = "org-123"
+        cipherService.hasPersonalCiphersResult = .success(false)
+
+        let result = try await subject.organizationIdRequiringVaultMigration()
+
+        XCTAssertNil(result)
+        XCTAssertTrue(cipherService.hasPersonalCiphersCalled)
+    }
+
+    // MARK: - policiesNew independent storage tests
+
+    /// `fetchSync()` stores `policiesNew` via `replacePoliciesNew` and the (empty) legacy `policies`
+    /// via `replacePolicies` independently when only `policiesNew` is present.
+    func test_fetchSync_policiesNew_newOnlyStoredInNewStore() async throws {
+        client.result = .httpSuccess(testData: .syncWithPoliciesNewOnly)
+        stateService.activeAccount = .fixture()
+
+        try await subject.fetchSync(forceSync: true)
+
+        XCTAssertTrue(policyService.replacePoliciesPolicies.isEmpty)
+        XCTAssertEqual(policyService.replacePoliciesNewPolicies.map(\.id), ["policy-new-1"])
+    }
+
+    /// `fetchSync()` stores `policiesNew` and `policies` each in their own store when both are present.
+    func test_fetchSync_policiesNew_newAndLegacyStoredIndependently() async throws {
+        client.result = .httpSuccess(testData: .syncWithNewAndLegacyFields)
+        stateService.activeAccount = .fixture()
+
+        try await subject.fetchSync(forceSync: true)
+
+        XCTAssertEqual(policyService.replacePoliciesPolicies.map(\.id), ["policy-legacy-1"])
+        XCTAssertEqual(policyService.replacePoliciesNewPolicies.map(\.id), ["policy-new-1"])
+    }
+
+    /// `fetchSync()` stores the legacy `policies` via `replacePolicies` and an empty list via
+    /// `replacePoliciesNew` when `policiesNew` is absent.
+    func test_fetchSync_policiesNew_absentStoresEmptyInNewStore() async throws {
+        client.result = .httpSuccess(testData: .syncWithPolicies)
+        stateService.activeAccount = .fixture()
+
+        try await subject.fetchSync(forceSync: true)
+
+        XCTAssertFalse(policyService.replacePoliciesPolicies.isEmpty)
+        XCTAssertEqual(policyService.replacePoliciesPolicies.first?.id, "policy-0")
+        XCTAssertTrue(policyService.replacePoliciesNewPolicies.isEmpty)
+    }
+
+    // MARK: - organizationsNew fallback tests
+
+    /// `fetchSync()` passes `organizationsNew` to `replaceOrganizations` when the field is present,
+    /// ignoring the legacy `profile.organizations`.
+    func test_fetchSync_organizationsNew_newOverridesLegacyOrganizations() async throws {
+        client.result = .httpSuccess(testData: .syncWithOrganizationsNew)
+        stateService.activeAccount = .fixture()
+
+        try await subject.fetchSync(forceSync: true)
+
+        XCTAssertEqual(organizationService.replaceOrganizationsOrganizations?.map(\.id), ["org-new-1"])
+    }
+
+    /// `fetchSync()` falls back to `profile.organizations` when `organizationsNew` is absent.
+    func test_fetchSync_organizationsNew_absentFallsBackToProfileOrganizations() async throws {
+        client.result = .httpSuccess(testData: .syncWithProfileOrganizations)
+        stateService.activeAccount = .fixture()
+
+        try await subject.fetchSync(forceSync: true)
+
+        // Legacy organizations from profile should be used when organizationsNew is nil.
+        XCTAssertFalse(organizationService.replaceOrganizationsOrganizations?.isEmpty ?? true)
+    }
+
+    /// `fetchSync()` calls `initializeOrganizationCrypto` with the `organizationsNew` data when present.
+    func test_fetchSync_organizationsNew_initializesOrgCryptoWithNewOrgs() async throws {
+        client.result = .httpSuccess(testData: .syncWithOrganizationsNew)
+        stateService.activeAccount = .fixture()
+        // isClientLocked defaults to false (not locked), so crypto init should be called.
+
+        try await subject.fetchSync(forceSync: true)
+
+        XCTAssertTrue(organizationService.initializeOrganizationCryptoWithOrgsCalled)
+    }
+
+    // MARK: - isProviderUser coalescing tests
+
+    /// `fetchSync()` sets `isProviderUser = false` when the org does not appear in `providerOrganizations`.
+    func test_fetchSync_isProviderUser_falseWhenNoProviderRelationship() async throws {
+        client.result = .httpSuccess(testData: .syncWithProfileOrganizations)
+        stateService.activeAccount = .fixture()
+
+        try await subject.fetchSync(forceSync: true)
+
+        let replacedOrgs = organizationService.replaceOrganizationsOrganizations ?? []
+        XCTAssertFalse(replacedOrgs.isEmpty)
+        XCTAssertTrue(replacedOrgs.allSatisfy { !$0.isProviderUser })
+    }
+
+    /// `fetchSync()` sets `isProviderUser = true` for any org that also appears in `providerOrganizations`,
+    /// including orgs where the user's member status is accepted (status = 1).
+    func test_fetchSync_isProviderUser_trueForMemberOrgWithProviderRelationship() async throws {
+        client.result = .httpSuccess(testData: .syncWithProviderOrganization)
+        stateService.activeAccount = .fixture()
+
+        try await subject.fetchSync(forceSync: true)
+
+        let replacedOrgs = organizationService.replaceOrganizationsOrganizations ?? []
+        XCTAssertEqual(replacedOrgs.count, 2)
+
+        let providerOrg = replacedOrgs.first { $0.id == "org-member-and-provider" }
+        let memberOnlyOrg = replacedOrgs.first { $0.id == "org-member-only" }
+
+        XCTAssertEqual(providerOrg?.isProviderUser, true)
+        XCTAssertEqual(memberOnlyOrg?.isProviderUser, false)
+    }
+
+    /// `fetchSync()` leaves `isProviderUser = false` for orgs not in `providerOrganizations`
+    /// even when other orgs in the same response have a provider relationship.
+    func test_fetchSync_isProviderUser_memberOnlyOrgIsNotMarkedAsProviderUser() async throws {
+        client.result = .httpSuccess(testData: .syncWithProviderOrganization)
+        stateService.activeAccount = .fixture()
+
+        try await subject.fetchSync(forceSync: true)
+
+        let replacedOrgs = organizationService.replaceOrganizationsOrganizations ?? []
+        let memberOnlyOrg = replacedOrgs.first { $0.id == "org-member-only" }
+        XCTAssertEqual(memberOnlyOrg?.isProviderUser, false)
+    }
+
+    /// `fetchSync()` does not modify any org when `providerOrganizations` is empty.
+    func test_fetchSync_isProviderUser_emptyProviderOrgListLeavesAllFalse() async throws {
+        // syncWithProfileOrganizations has providerOrganizations: [] on the profile.
+        client.result = .httpSuccess(testData: .syncWithProfileOrganizations)
+        stateService.activeAccount = .fixture()
+
+        try await subject.fetchSync(forceSync: true)
+
+        let replacedOrgs = organizationService.replaceOrganizationsOrganizations ?? []
+        XCTAssertFalse(replacedOrgs.isEmpty)
+        XCTAssertTrue(replacedOrgs.allSatisfy { !$0.isProviderUser })
+    }
+}
+
+class MockSyncServiceDelegate: SyncServiceDelegate {
+    var migrateVaultToMyItemsCalled = false
+    var migrateVaultToMyItemsOrganizationId: String?
+    var onFetchSyncSucceededCalledWithuserId: String?
+    var removeMasterPasswordCalled = false
+    var removeMasterPasswordOrganizationName: String?
+    var securityStampChangedCalled = false
+    var securityStampChangedUserId: String?
+    var setMasterPasswordCalled = false
+    var setMasterPasswordOrgId: String?
+    var removeMasterPasswordOrganizationId: String?
+    var removeMasterPasswordKeyConnectorUrl: String?
+
+    func migrateVaultToMyItems(organizationId: String) {
+        migrateVaultToMyItemsCalled = true
+        migrateVaultToMyItemsOrganizationId = organizationId
+    }
+
+    func onFetchSyncSucceeded(userId: String) async {
+        onFetchSyncSucceededCalledWithuserId = userId
+    }
+
+    func removeMasterPassword(organizationName: String, organizationId: String, keyConnectorUrl: String) {
+        removeMasterPasswordOrganizationName = organizationName
+        removeMasterPasswordOrganizationId = organizationId
+        removeMasterPasswordKeyConnectorUrl = keyConnectorUrl
+        removeMasterPasswordCalled = true
+    }
+
+    func securityStampChanged(userId: String) async {
+        securityStampChangedCalled = true
+        securityStampChangedUserId = userId
+    }
+
+    func setMasterPassword(orgIdentifier: String) async {
+        setMasterPasswordCalled = true
+        setMasterPasswordOrgId = orgIdentifier
+    }
+} // swiftlint:disable:this file_length

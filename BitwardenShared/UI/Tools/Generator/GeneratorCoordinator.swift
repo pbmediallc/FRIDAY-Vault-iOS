@@ -1,0 +1,154 @@
+import BitwardenKit
+import SwiftUI
+
+// MARK: - GeneratorCoordinatorDelegate
+
+/// An object that is signaled when specific circumstances in the generator flow have been
+/// encountered.
+///
+@MainActor
+protocol GeneratorCoordinatorDelegate: AnyObject {
+    /// Called when the generator flow has been completed.
+    ///
+    /// - Parameters:
+    ///   - type: The type that was generated.
+    ///   - value: The value that was generated.
+    ///
+    func didCompleteGenerator(for type: GeneratorType, with value: String)
+
+    /// Called when the generator flow has been canceled.
+    ///
+    func didCancelGenerator()
+}
+
+// MARK: - GeneratorCoordinator
+
+/// A coordinator that manages navigation in the generator tab.
+///
+final class GeneratorCoordinator: Coordinator, HasStackNavigator {
+    // MARK: Types
+
+    typealias Module = NavigatorBuilderModule
+        & PasswordHistoryModule
+
+    typealias Services = HasBillingService
+        & HasConfigService
+        & HasErrorAlertServices.ErrorAlertServices
+        & HasErrorReporter
+        & HasGeneratorRepository
+        & HasPasteboardService
+        & HasPolicyService
+        & HasReviewPromptService
+        & HasStateService
+
+    // MARK: Private Properties
+
+    /// A delegate that responds to events in this coordinator.
+    private weak var delegate: GeneratorCoordinatorDelegate?
+
+    /// The module used by this coordinator to create child coordinators.
+    private let module: Module
+
+    /// The services used by this coordinator.
+    private let services: Services
+
+    // MARK: Properties
+
+    /// The stack navigator that is managed by this coordinator.
+    private(set) weak var stackNavigator: StackNavigator?
+
+    // MARK: Initialization
+
+    /// Creates a new `GeneratorCoordinator`.
+    ///
+    /// - Parameters:
+    ///   - delegate: An optional delegate that responds to events in this coordinator.
+    ///   - module: The module used by this coordinator to create child coordinators.
+    ///   - services: The services used by this coordinator.
+    ///   - stackNavigator: The stack navigator that is managed by this coordinator.
+    ///
+    init(
+        delegate: GeneratorCoordinatorDelegate?,
+        module: Module,
+        services: Services,
+        stackNavigator: StackNavigator,
+    ) {
+        self.delegate = delegate
+        self.module = module
+        self.services = services
+        self.stackNavigator = stackNavigator
+    }
+
+    // MARK: Methods
+
+    func navigate(to route: GeneratorRoute, context _: AnyObject?) {
+        switch route {
+        case .cancel:
+            delegate?.didCancelGenerator()
+        case let .complete(type, value):
+            delegate?.didCompleteGenerator(for: type, with: value)
+        case .dismiss:
+            stackNavigator?.dismiss()
+        case let .generator(type, emailWebsite, passwordRules, savePasswordHistory):
+            showGenerator(
+                for: type,
+                emailWebsite: emailWebsite,
+                passwordRules: passwordRules,
+                savePasswordHistory: savePasswordHistory,
+            )
+        case .generatorHistory:
+            showGeneratorHistory()
+        }
+    }
+
+    func start() {
+        navigate(to: .generator())
+    }
+
+    // MARK: Private Methods
+
+    /// Shows the generator screen.
+    ///
+    /// - Parameter type: The type to initialize this generator screen with. If a value is provided,
+    ///   then the type field in the generator screen will be hidden, to eliminate the ability to
+    ///   switch between the various types.
+    ///
+    private func showGenerator(
+        for type: GeneratorType?,
+        emailWebsite: String?,
+        passwordRules: String?,
+        savePasswordHistory: Bool = true,
+    ) {
+        let state = GeneratorState(
+            generatorType: type ?? .password,
+            forcedPasswordRules: passwordRules,
+            presentationMode: type == nil ? .tab : .inPlace,
+            savePasswordHistory: savePasswordHistory,
+            usernameState: GeneratorState.UsernameState(emailWebsite: emailWebsite),
+        )
+        let processor = GeneratorProcessor(
+            coordinator: asAnyCoordinator(),
+            services: services,
+            state: state,
+        )
+        let view = GeneratorView(store: Store(processor: processor))
+        stackNavigator?.replace(view)
+    }
+
+    /// Shows the generator password history screen.
+    ///
+    private func showGeneratorHistory() {
+        let navigationController = module.makeNavigationController()
+        let coordinator = module.makePasswordHistoryCoordinator(stackNavigator: navigationController)
+        coordinator.start()
+        coordinator.navigate(to: .passwordHistoryList(.generator))
+
+        stackNavigator?.present(navigationController)
+    }
+}
+
+// MARK: - HasErrorAlertServices
+
+extension GeneratorCoordinator: HasErrorAlertServices {
+    var errorAlertServices: ErrorAlertServices { services }
+}

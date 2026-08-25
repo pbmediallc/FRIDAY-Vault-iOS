@@ -1,0 +1,104 @@
+# Xcode
+#
+# gitignore contributors: remember to update Global/Xcode.gitignore, Objective-C.gitignore & Swift.gitignore
+
+# macOS
+.DS_Store
+
+## User settings
+xcuserdata/
+
+## compatibility with Xcode 8 and earlier (ignoring not required starting Xcode 9)
+*.xcscmblueprint
+*.xccheckout
+
+## compatibility with Xcode 3 and earlier (ignoring not required starting Xcode 4)
+build/
+DerivedData/
+*.moved-aside
+*.pbxuser
+!default.pbxuser
+*.mode1v3
+!default.mode1v3
+*.mode2v3
+!default.mode2v3
+*.perspectivev3
+!default.perspectivev3
+
+## UserDefaults testing
+*.swift.plist
+
+## Obj-C/Swift specific
+*.hmap
+
+## App packaging
+*.ipa
+*.dSYM.zip
+*.dSYM
+*dSYMs.zip
+
+## Signing and provisioning material
+*.p8
+*.p12
+*.mobileprovision
+*.keychain-db
+
+## Playgrounds
+timeline.xctimeline
+playground.xcworkspace
+
+# Swift Package Manager
+#
+# Add this line if you want to avoid checking in source code from Swift Package Manager dependencies.
+# Packages/
+# Package.pins
+# Package.resolved
+# *.xcodeproj
+#
+# Xcode automatically generates this directory with a .xcworkspacedata file and xcuserdata
+# hence it is not needed unless you have added a package configuration file to your project
+# .swiftpm
+
+.build/
+
+# fastlane
+#
+# It is recommended to not store the screenshots in the git repo.
+# Instead, use fastlane to re-generate the screenshots whenever they are needed.
+# For more information about the recommended setup visit:
+# https://docs.fastlane.tools/best-practices/source-control/#source-control
+
+fastlane/report.xml
+fastlane/Preview.html
+fastlane/screenshots/**/*.png
+fastlane/test_output
+fastlane/README.md
+
+# XcodeGen
+/*.xcodeproj
+
+# Local xcconfig
+Configs/Local*.xcconfig
+
+# Local export options
+Configs/export_options.plist
+
+# LicensePlist
+Bitwarden/Application/Support/Settings.bundle/Acknowledgements.latest_result.txt
+Authenticator/Application/Support/Settings.bundle/Acknowledgements.latest_result.txt
+
+# Backup files
+*.bak
+
+# AI
+.claude/outputs/
+.claude/settings.local.json
+review-*.md
+
+# Generated files
+BitwardenKit/Core/Platform/Utilities/SDKVersionInfo.swift
+
+# Python from https://github.com/github/gitignore/blob/main/Python.gitignore
+__pycache__/
+*.py[codz]
+*$py.class

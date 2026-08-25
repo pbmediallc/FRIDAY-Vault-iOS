@@ -1,0 +1,66 @@
+import BitwardenKit
+import Foundation
+
+// MARK: - ExternalLinksConstants
+
+/// Links that are used throughout the app.
+///
+extension ExternalLinksConstants {
+    // MARK: Properties
+
+    /// A link to Bitwarden's organizations information webpage.
+    static let aboutOrganizations = URL(string: "https://bitwarden.com/help/about-organizations")!
+
+    /// A deep link to the F.R.I.D.A.Y. Vault app.
+    static let appDeepLink = URL(string: "fridayvault://")!
+
+    /// A link to the app review page within the app store.
+    static let appReview = URL(string: "https://itunes.apple.com/us/app/id1137397744?action=write-review")
+
+    /// A link to Bitwarden's help page for the integrated authenticator feature.
+    static let authenticatorHelp = URL(string: "https://bitwarden.com/help/integrated-authenticator")!
+
+    /// A link to the auto fill help page.
+    static let autofillHelp = URL(string: "https://bitwarden.com/help/auto-fill-ios/#keyboard-auto-fill")!
+
+    /// A link to Bitwarden's help page for the Fill Assist feature.
+    static let fillAssistHelp = URL(string: "https://bitwarden.com/help/fill-assist/")!
+
+    /// A link to Bitwarden's help page for learning more about the account fingerprint phrase.
+    static let fingerprintPhrase = URL(string: "https://bitwarden.com/help/fingerprint-phrase/")!
+
+    /// A link to Bitwarden's help page for generating username types.
+    static let generatorUsernameTypes = URL(string: "https://bitwarden.com/help/generator/#username-types")!
+
+    /// A link to the import logins help page.
+    static let importHelp = URL(string: "https://bitwarden.com/help/import-data/")!
+
+    /// A link to Bitwarden's help page for learning more about Premium features.
+    static let learnMoreAboutPremium = URL(string: "https://bitwarden.com/help/password-manager-plans/")!
+
+    /// A link to the password options within the passwords section of the settings menu.
+    static let passwordOptions = URL(string: "App-prefs:PASSWORDS&path=PASSWORD_OPTIONS")!
+
+    /// A markdown link to Bitwarden's help page about protecting individual items.
+    static let protectIndividualItems = URL(
+        string: "https://bitwarden.com/help/managing-items/#protect-individual-items",
+    )!
+
+    /// A link to Bitwarden's product page for Sends.
+    static let sendInfo = URL(string: "https://bitwarden.com/products/send/")!
+
+    /// A markdown link to Bitwarden's terms of service.
+    static let termsOfService = URL(string: "https://bitwarden.com/terms/")!
+
+    /// A link to Bitwarden's help page for My vault items migration. .
+    static let transferOwnership = URL(string: "https://bitwarden.com/help/transfer-ownership/")!
+
+    /// A markdown link to Bitwarden's marketing email preferences.
+    static let unsubscribeFromMarketingEmails = URL(string: "https://bitwarden.com/email-preferences/")!
+
+    /// A link to Bitwarden's help page for URI match detection.
+    static let uriMatchDetections = URL(string: "https://bitwarden.com/help/uri-match-detection/")!
+
+    /// A link to Bitwarden's help page for showing website icons.
+    static let websiteIconsHelp = URL(string: "https://bitwarden.com/help/website-icons/")!
+}

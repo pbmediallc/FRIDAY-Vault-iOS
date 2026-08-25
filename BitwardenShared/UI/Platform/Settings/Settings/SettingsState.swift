@@ -1,0 +1,47 @@
+import Foundation
+
+/// An object that defines the current state of a `SettingsView`.
+///
+struct SettingsState: Equatable {
+    // MARK: Properties
+
+    /// The state of the badges in the settings tab.
+    var badgeState: SettingsBadgeState?
+
+    /// Whether the active account has a Premium subscription.
+    var hasPremium = false
+
+    /// The presentation mode based on where the settings view is displayed from. This determines
+    /// if the UI should show specific elements.
+    var presentationMode = SettingsPresentationMode.tab
+
+    /// Whether the "Upgraded to Premium" action card should be shown.
+    var shouldShowUpgradedToPremiumActionCard: Bool = false
+
+    /// Whether the Premium plan row should be shown.
+    var showPlanRow = false
+
+    /// The URL to open externally (e.g. learn more about Premium).
+    var url: URL?
+
+    // MARK: Computed Properties
+
+    /// The badge value for the account security row.
+    var accountSecurityBadgeValue: String? {
+        let isComplete = badgeState?.vaultUnlockSetupProgress?.isComplete ?? true
+        return isComplete ? nil : "1"
+    }
+
+    /// The badge value for the autofill row.
+    var autofillBadgeValue: String? {
+        let isComplete = badgeState?.autofillSetupProgress?.isComplete ?? true
+        return isComplete ? nil : "1"
+    }
+
+    /// The badge value for the vault row.
+    var vaultBadgeValue: String? {
+        // Since the action card displays on the vault when the progress is incomplete, only show a
+        // badge value if the user wants to set it up later.
+        badgeState?.importLoginsSetupProgress == .setUpLater ? "1" : nil
+    }
+}

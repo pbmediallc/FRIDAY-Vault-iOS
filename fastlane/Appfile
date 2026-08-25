@@ -1,0 +1,1 @@
+app_identifier ENV["BUNDLE_ID"] || "com.8bit.bitwarden"

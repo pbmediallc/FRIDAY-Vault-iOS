@@ -1,0 +1,549 @@
+import BitwardenKit
+@preconcurrency import BitwardenSdk
+
+// swiftlint:disable file_length
+
+// MARK: - PolicyService
+
+/// A protocol for a `PolicyService` which manages syncing and updates to the user's policies.
+///
+protocol PolicyService: AnyObject {
+    /// Applies the password generation policy to the password generation options.
+    ///
+    /// - Parameter options: The options to apply the policy to.
+    /// - Returns: Whether the password generation policy is in effect.
+    ///
+    func applyPasswordGenerationPolicy(options: inout PasswordGenerationOptions) async throws -> Bool
+
+    /// Fetches the maximum vault timeout policy values if the policy is enabled.
+    ///
+    /// - Returns: A `SessionTimeoutPolicy` containing the policy's timeout action, type, and value,
+    ///   or `nil` if no maximum vault timeout policies apply to the user.
+    ///
+    func fetchTimeoutPolicyValues() async throws -> SessionTimeoutPolicy?
+
+    /// Go through current users policy, filter them and build a master password policy options based on enabled policy.
+    /// - Returns: Optional `MasterPasswordPolicyOptions` if it exist.
+    ///
+    func getMasterPasswordPolicyOptions() async throws -> MasterPasswordPolicyOptions?
+
+    /// Get all active restricted item types policy organization ids that apply to the active user.
+    ///
+    /// - Returns: Active policy organization ids that apply to the user.
+    ///
+    func getOrganizationIdsForRestricItemTypesPolicy() async -> [String]
+
+    /// Returns the organization user notification banner data if the feature flag is enabled and the
+    /// policy applies to the active user, or `nil` otherwise.
+    ///
+    /// - Returns: The `OrganizationUserNotificationBannerData` for the earliest-revision policy that
+    ///   applies to the user, or `nil` if none applies or the policy has no `description` field.
+    ///
+    func getOrganizationUserNotificationBannerData() async -> OrganizationUserNotificationBannerData?
+
+    /// Get the restricted types based on the organization's policies.
+    ///
+    /// - Returns: An array of restricted `CipherType`s.
+    ///
+    func getRestrictedItemCipherTypes() async -> [CipherType]
+
+    /// Returns whether the send hide email option is disabled because of a policy.
+    ///
+    /// - Returns: Whether the send hide email option is disabled.
+    ///
+    func isSendHideEmailDisabledByPolicy() async -> Bool
+
+    /// Gets the organization ID with the earliest revision date that is applying a policy to the active user.
+    ///
+    /// - Parameter policyType: The policy to check.
+    /// - Returns: The organization ID with the earliest revision date applying the policy, or `nil` if none.
+    ///
+    func getEarliestOrganizationApplyingPolicy(_ policyType: PolicyType) async -> String?
+
+    /// Gets the organizations IDs that are applying the policy to the active user.
+    ///
+    /// - Parameter policyType: The policy to check.
+    /// - Returns: The organizations applying the policy to the active user.
+    ///
+    func organizationsApplyingPolicyToUser(_ policyType: PolicyType) async -> [String]
+
+    /// Determines whether a policy applies to the active user.
+    ///
+    /// - Parameter policyType: The policy to check.
+    /// - Returns: Whether the policy applies to the user.
+    ///
+    func policyAppliesToUser(_ policyType: PolicyType) async -> Bool
+
+    /// Replaces the list of policies for the user.
+    ///
+    /// - Parameters:
+    ///   - policies: The list of policies.
+    ///   - userId: The user ID associated with the policies.
+    ///
+    func replacePolicies(_ policies: [PolicyResponseModel], userId: String) async throws
+
+    /// Replaces the list of accepted-state policies (from `policiesNew`) for the user.
+    ///
+    /// - Parameters:
+    ///   - policies: The list of accepted-state policies.
+    ///   - userId: The user ID associated with the policies.
+    ///
+    func replacePoliciesNew(_ policies: [PolicyResponseModel], userId: String) async throws
+}
+
+// MARK: - DefaultPolicyService
+
+/// A default implementation of a `PolicyService` which manages syncing and updates to the user's
+/// policies.
+///
+actor DefaultPolicyService: PolicyService {
+    // MARK: Properties
+
+    /// The service that handles common client functionality such as encryption and decryption.
+    let clientService: ClientService
+
+    /// The service to get server-specified configuration.
+    let configService: ConfigService
+
+    /// The service used by the application to report non-fatal errors.
+    let errorReporter: ErrorReporter
+
+    /// The data store for managing the persisted policies for the user.
+    let policyDataStore: PolicyDataStore
+
+    /// The service for managing the organizations for the user.
+    let organizationService: OrganizationService
+
+    /// The list of policies, keyed by the user's ID.
+    private var policiesByUserId = [String: [Policy]]()
+
+    /// The list of accepted-state policies (from `policiesNew`), keyed by the user's ID.
+    private var policiesNewByUserId = [String: [Policy]]()
+
+    /// The service used by the application to manage account state.
+    let stateService: StateService
+
+    // MARK: Initialization
+
+    /// Initialize a `DefaultPolicyService`.
+    ///
+    /// - Parameters:
+    ///   - clientService: The service that handles common client functionality such as encryption
+    ///     and decryption.
+    ///   - configService: The service to get server-specified configuration.
+    ///   - errorReporter: The service used by the application to report non-fatal errors.
+    ///   - organizationService: The service for managing the organizations for the user.
+    ///   - policyDataStore: The data store for managing the persisted policies for the user.
+    ///   - stateService: The service used by the application to manage account state.
+    ///
+    init(
+        clientService: ClientService,
+        configService: ConfigService,
+        errorReporter: ErrorReporter,
+        organizationService: OrganizationService,
+        policyDataStore: PolicyDataStore,
+        stateService: StateService,
+    ) {
+        self.clientService = clientService
+        self.configService = configService
+        self.errorReporter = errorReporter
+        self.organizationService = organizationService
+        self.policyDataStore = policyDataStore
+        self.stateService = stateService
+    }
+
+    // MARK: Private
+
+    /// Determines whether an organization is exempt from a specific policy.
+    ///
+    /// - Parameters:
+    ///   - organization: The organization used to determine if it is exempt.
+    ///   - policyType: The policy to check.
+    /// - Returns: Whether the organization is exempt from the policy.
+    ///
+    private func isOrganization(_ organization: Organization, exemptFrom policyType: PolicyType) -> Bool {
+        if policyType == .passwordGenerator
+            || policyType == .removeUnlockWithPin
+            || policyType == .restrictItemTypes {
+            return false
+        }
+
+        if policyType == .maximumVaultTimeout {
+            return organization.type == .owner
+        }
+
+        return organization.isExemptFromPolicies
+    }
+
+    /// Determines whether a policy applies to the active user.
+    ///
+    /// - Parameters:
+    ///   - policyType: The policy to check.
+    ///   - filter: An optional filter to apply to the list of policies.
+    /// - Returns: Whether the policy applies to the user.
+    ///
+    private func policyAppliesToUser(_ policyType: PolicyType, filter: ((Policy) -> Bool)? = nil) async -> Bool {
+        await !policiesApplyingToUser(policyType, filter: filter).isEmpty
+    }
+
+    /// The list of policies for a policy type that apply to the active user.
+    ///
+    /// When the `policiesInAcceptedState` feature flag is enabled, evaluation is delegated to the
+    /// Bitwarden SDK via `PoliciesClient.filterByType`. Otherwise, the legacy native filter is used.
+    ///
+    /// - Parameters:
+    ///   - policyType: The policy to check.
+    ///   - filter: An optional filter to apply to the list of policies before SDK/native evaluation.
+    /// - Returns: The list of policies that apply to the user.
+    ///
+    private func policiesApplyingToUser(_ policyType: PolicyType, filter: ((Policy) -> Bool)? = nil) async -> [Policy] {
+        guard let userId = try? await stateService.getActiveAccountId(),
+              let organizations = try? await organizationService.fetchAllOrganizations()
+        else {
+            return []
+        }
+
+        guard await configService.getFeatureFlag(.policiesInAcceptedState) else {
+            guard let policies = try? await policiesForUser(userId: userId, type: policyType, filter: filter) else {
+                return []
+            }
+
+            // Legacy native filter: the policy applies when the organization is in accepted or confirmed
+            // state, uses policies, and the user is not exempt from the policy.
+            return policies.filter { policy in
+                guard let organization = organizations.first(where: { $0.id == policy.organizationId })
+                else { return false }
+                return (organization.status == .accepted || organization.status == .confirmed) &&
+                    organization.usePolicies &&
+                    !isOrganization(organization, exemptFrom: policyType)
+            }
+        }
+
+        do {
+            return try await sdkFilterPolicies(
+                organizations: organizations,
+                policyType: policyType,
+                userId: userId,
+                filter: filter,
+            )
+        } catch {
+            errorReporter.log(error: error)
+            return []
+        }
+    }
+
+    /// Delegates policy filtering to the Bitwarden SDK.
+    ///
+    /// - Parameters:
+    ///   - organizations: All organizations for the active user.
+    ///   - policyType: The policy type being evaluated.
+    ///   - userId: The active user's ID.
+    ///   - filter: An optional filter to apply to the list of policies before SDK evaluation.
+    /// - Returns: The policies that the SDK determines apply to the user.
+    ///
+    private func sdkFilterPolicies(
+        organizations: [Organization],
+        policyType: PolicyType,
+        userId: String,
+        filter: ((Policy) -> Bool)? = nil,
+    ) async throws -> [Policy] {
+        guard let sdkPolicyType = BitwardenSdk.PolicyType(policyType) else {
+            return []
+        }
+
+        let policies = try await policiesNewForUser(userId: userId, filter: filter)
+        let sdkPolicies = policies.compactMap { BitwardenSdk.PolicyView($0) }
+        guard !sdkPolicies.isEmpty else {
+            return []
+        }
+
+        let filtered = try await clientService.policies(for: userId)
+            .filterByType(
+                policies: sdkPolicies,
+                organizationUserPolicyContexts: organizations.map { BitwardenSdk.OrganizationUserPolicyContext($0) },
+                policyType: sdkPolicyType,
+            )
+
+        return filtered.map { Policy($0) }
+    }
+
+    /// Returns the list of policies that are assigned to the user.
+    ///
+    /// - Parameters:
+    ///   - userId: The user ID of the user.
+    ///   - type: The type of policies to return.
+    ///   - filter: An optional filter to apply to the list of policies.
+    /// - Returns: The list of the user's policies.
+    ///
+    private func policiesForUser(
+        userId: String,
+        type: PolicyType,
+        filter: ((Policy) -> Bool)? = nil,
+    ) async throws -> [Policy] {
+        let policies: [Policy]
+        if let cachedPolicies = policiesByUserId[userId] {
+            policies = cachedPolicies
+        } else {
+            policies = try await policyDataStore.fetchAllPolicies(userId: userId)
+            policiesByUserId[userId] = policies
+        }
+
+        return policies.filter { policy in
+            policy.enabled && policy.type == type && filter?(policy) ?? true
+        }
+    }
+
+    /// Returns all accepted-state policies (`policiesNew`) for the user, using an in-memory cache.
+    ///
+    /// - Parameters:
+    ///   - userId: The user ID of the user.
+    ///   - filter: An optional filter to apply to the list of policies.
+    /// - Returns: All policies from the accepted-state store with the filter applied, if any.
+    ///
+    private func policiesNewForUser(
+        userId: String,
+        filter: ((Policy) -> Bool)? = nil,
+    ) async throws -> [Policy] {
+        let policies: [Policy]
+        if let cachedPolicies = policiesNewByUserId[userId] {
+            policies = cachedPolicies
+        } else {
+            policies = try await policyDataStore.fetchAllPoliciesNew(userId: userId)
+            policiesNewByUserId[userId] = policies
+        }
+
+        return filter.map { policies.filter($0) } ?? policies
+    }
+
+    /// Returns the policy with the earliest revision date from the given list, or `nil` if the list is empty.
+    ///
+    /// - Parameter policies: The list of policies to search.
+    /// - Returns: The policy with the earliest revision date.
+    ///
+    private func policyWithEarliestRevisionDate(from policies: [Policy]) -> Policy? {
+        policies.min { ($0.revisionDate ?? .distantFuture) < ($1.revisionDate ?? .distantFuture) }
+    }
+}
+
+extension DefaultPolicyService {
+    // swiftlint:disable:next cyclomatic_complexity
+    func applyPasswordGenerationPolicy(options: inout PasswordGenerationOptions) async throws -> Bool {
+        let policies = await policiesApplyingToUser(.passwordGenerator)
+        guard !policies.isEmpty else { return false }
+
+        // When determining the generator type, ignore the existing option's type to find the preferred
+        // default type based on the policies. Then set it on `options` below.
+        var generatorType: PasswordGeneratorType?
+        options.overridePasswordType = false
+        for policy in policies {
+            if let overridePasswordTypeString = policy[.overridePasswordType]?.stringValue,
+               let overridePasswordType = PasswordGeneratorType(rawValue: overridePasswordTypeString),
+               generatorType != .password {
+                // If there's multiple policies with different default types, the password type
+                // should take priority. Use `generateType` as opposed to `options.type` to ignore
+                // the existing type in the options.
+                generatorType = overridePasswordType
+                options.overridePasswordType = true
+            }
+
+            if let minLength = policy[.minLength]?.intValue {
+                options.setMinLength(minLength)
+            }
+
+            if policy[.useUpper]?.boolValue == true {
+                options.uppercase = true
+            }
+
+            if policy[.useLower]?.boolValue == true {
+                options.lowercase = true
+            }
+
+            if policy[.useNumbers]?.boolValue == true {
+                options.number = true
+            }
+
+            if policy[.useSpecial]?.boolValue == true {
+                options.special = true
+            }
+
+            if policy[.capitalize]?.boolValue == true {
+                options.capitalize = true
+            }
+
+            if policy[.includeNumber]?.boolValue == true {
+                options.includeNumber = true
+            }
+
+            if let minNumbers = policy[.minNumbers]?.intValue {
+                options.setMinNumbers(minNumbers)
+            }
+
+            if let minSpecial = policy[.minSpecial]?.intValue {
+                options.setMinSpecial(minSpecial)
+            }
+
+            if let minNumberWords = policy[.minNumberWords]?.intValue {
+                options.setMinNumberWords(minNumberWords)
+            }
+        }
+
+        // A type determine by the policy should take priority over the option's existing type.
+        options.type = generatorType ?? options.type
+
+        return true
+    }
+
+    func fetchTimeoutPolicyValues() async throws -> SessionTimeoutPolicy? {
+        let policies = await policiesApplyingToUser(.maximumVaultTimeout)
+        guard !policies.isEmpty else { return nil }
+
+        var timeoutAction: SessionTimeoutAction?
+        var timeoutType: SessionTimeoutType?
+        var timeoutValue: SessionTimeoutValue?
+
+        for policy in policies {
+            guard let policyTimeoutValue = policy[.minutes]?.intValue else { continue }
+            timeoutValue = SessionTimeoutValue(rawValue: policyTimeoutValue)
+
+            // Legacy servers may not send this value.
+            // In that case, we will present to the user the custom type.
+            if policy[.type] != nil {
+                timeoutType = SessionTimeoutType(rawValue: policy[.type]?.stringValue)
+            }
+
+            // If the policy's timeout action is not lock or logOut, there is no policy timeout action.
+            // In that case, we would present both timeout action options to the user.
+            guard let action = policy[.action]?.stringValue, action == "lock" || action == "logOut" else {
+                return SessionTimeoutPolicy(timeoutAction: nil, timeoutType: timeoutType, timeoutValue: timeoutValue)
+            }
+            switch action {
+            case "lock":
+                timeoutAction = .lock
+            case "logOut":
+                timeoutAction = .logout
+            default:
+                timeoutAction = nil
+            }
+        }
+        return SessionTimeoutPolicy(timeoutAction: timeoutAction, timeoutType: timeoutType, timeoutValue: timeoutValue)
+    }
+
+    func getOrganizationUserNotificationBannerData() async -> OrganizationUserNotificationBannerData? {
+        guard await configService.getFeatureFlag(.organizationUserNotificationBanner) else { return nil }
+
+        let policies = await policiesApplyingToUser(.organizationUserNotification)
+
+        guard let policy = policyWithEarliestRevisionDate(from: policies),
+              let description = policy[.description]?.stringValue
+        else { return nil }
+
+        return OrganizationUserNotificationBannerData(
+            buttonText: policy[.buttonText]?.stringValue,
+            description: description,
+            headerText: policy[.header]?.stringValue,
+            showAfterEveryLogin: policy[.showAfterEveryLogin]?.boolValue ?? false,
+        )
+    }
+
+    func getMasterPasswordPolicyOptions() async throws -> MasterPasswordPolicyOptions? {
+        let policies = await policiesApplyingToUser(.masterPassword) { $0.data != nil }
+        guard !policies.isEmpty else { return nil }
+
+        var minComplexity: UInt8 = 0
+        var minLength: UInt8 = 0
+        var requireUpper = false
+        var requireLower = false
+        var requireNumbers = false
+        var requireSpecial = false
+        var enforceOnLogin = false
+
+        for policy in policies {
+            if let minimumComplexity = policy[.minComplexity]?.intValue,
+               minimumComplexity > minComplexity,
+               let uint8Value = UInt8(exactly: minimumComplexity) {
+                minComplexity = uint8Value
+            }
+
+            if let minimumLength = policy[.minLength]?.intValue,
+               minimumLength > minLength,
+               let uint8Value = UInt8(exactly: minimumLength) {
+                minLength = uint8Value
+            }
+
+            if policy[.requireUpper]?.boolValue == true {
+                requireUpper = true
+            }
+
+            if policy[.requireLower]?.boolValue == true {
+                requireLower = true
+            }
+
+            if policy[.requireNumbers]?.boolValue == true {
+                requireNumbers = true
+            }
+
+            if policy[.requireSpecial]?.boolValue == true {
+                requireSpecial = true
+            }
+
+            if policy[.enforceOnLogin]?.boolValue == true {
+                enforceOnLogin = true
+            }
+        }
+
+        return MasterPasswordPolicyOptions(
+            minComplexity: minComplexity,
+            minLength: minLength,
+            requireUpper: requireUpper,
+            requireLower: requireLower,
+            requireNumbers: requireNumbers,
+            requireSpecial: requireSpecial,
+            enforceOnLogin: enforceOnLogin,
+        )
+    }
+
+    func getOrganizationIdsForRestricItemTypesPolicy() async -> [String] {
+        await policiesApplyingToUser(.restrictItemTypes, filter: nil).map { policy in
+            policy.organizationId
+        }
+    }
+
+    func getRestrictedItemCipherTypes() async -> [CipherType] {
+        let restrictedTypesOrgIds = await getOrganizationIdsForRestricItemTypesPolicy()
+        guard !restrictedTypesOrgIds.isEmpty else {
+            return []
+        }
+
+        return [.card]
+    }
+
+    func getEarliestOrganizationApplyingPolicy(_ policyType: PolicyType) async -> String? {
+        let policies = await policiesApplyingToUser(policyType, filter: nil)
+        return policyWithEarliestRevisionDate(from: policies)?.organizationId
+    }
+
+    func isSendHideEmailDisabledByPolicy() async -> Bool {
+        await policyAppliesToUser(.sendOptions) { policy in
+            policy[.disableHideEmail]?.boolValue == true
+        }
+    }
+
+    func organizationsApplyingPolicyToUser(_ policyType: PolicyType) async -> [String] {
+        let policies = await policiesApplyingToUser(policyType, filter: nil)
+        return policies.map(\.organizationId)
+    }
+
+    func policyAppliesToUser(_ policyType: PolicyType) async -> Bool {
+        await policyAppliesToUser(policyType, filter: nil)
+    }
+
+    func replacePolicies(_ policies: [PolicyResponseModel], userId: String) async throws {
+        policiesByUserId[userId] = policies.map(Policy.init)
+        try await policyDataStore.replacePolicies(policies, userId: userId)
+    }
+
+    func replacePoliciesNew(_ policies: [PolicyResponseModel], userId: String) async throws {
+        policiesNewByUserId[userId] = policies.map(Policy.init)
+        try await policyDataStore.replacePoliciesNew(policies, userId: userId)
+    }
+}

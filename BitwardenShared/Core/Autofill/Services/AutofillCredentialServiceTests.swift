@@ -1,0 +1,1501 @@
+import AuthenticationServices
+import BitwardenKit
+import BitwardenKitMocks
+import BitwardenSdk
+import BitwardenSdkMocks
+import Combine
+import TestHelpers
+import XCTest
+
+@testable import BitwardenShared
+@testable import BitwardenSharedMocks
+
+@MainActor
+class AutofillCredentialServiceTests: BitwardenTestCase { // swiftlint:disable:this type_body_length
+    // MARK: Properties
+
+    var appContextHelper: MockAppContextHelper!
+    var autofillCredentialServiceDelegate: MockAutofillCredentialServiceDelegate!
+    var cipherService: MockCipherService!
+    var clientService: MockClientService!
+    var configService: MockConfigService!
+    var credentialIdentityFactory: MockCredentialIdentityFactory!
+    var deviceAuthKeySubject = CurrentValueSubject<[String: Bool], Never>([:])
+    var deviceAuthKeyService: MockDeviceAuthKeyService!
+    var errorReporter: MockErrorReporter!
+    var eventService: MockEventService!
+    var fido2UserInterfaceHelperDelegate: MockFido2UserInterfaceHelperDelegate!
+    var fido2CredentialStore: MockFido2CredentialStore!
+    var fido2UserInterfaceHelper: MockFido2UserInterfaceHelper!
+    var flightRecorder: MockFlightRecorder!
+    var identityStore: MockCredentialIdentityStore!
+    var notificationCenterService: MockNotificationCenterService!
+    var pasteboardService: MockPasteboardService!
+    var stateService: MockStateService!
+    var timeProvider: MockTimeProvider!
+    var totpService: MockTOTPService!
+    var subject: DefaultAutofillCredentialService!
+    var vaultTimeoutService: MockVaultTimeoutService!
+
+    var fido2AuthenticatorMock: MockClientFido2AuthenticatorProtocol {
+        clientService.mockPlatform.mockFido2.mockAuthenticator
+    }
+
+    // MARK: Setup & Teardown
+
+    override func setUp() {
+        super.setUp()
+
+        appContextHelper = MockAppContextHelper()
+        autofillCredentialServiceDelegate = MockAutofillCredentialServiceDelegate()
+        cipherService = MockCipherService()
+        clientService = MockClientService()
+        configService = MockConfigService()
+        credentialIdentityFactory = MockCredentialIdentityFactory()
+        deviceAuthKeyService = MockDeviceAuthKeyService()
+        errorReporter = MockErrorReporter()
+        eventService = MockEventService()
+        fido2UserInterfaceHelperDelegate = MockFido2UserInterfaceHelperDelegate()
+        fido2CredentialStore = MockFido2CredentialStore()
+        fido2UserInterfaceHelper = MockFido2UserInterfaceHelper()
+        flightRecorder = MockFlightRecorder()
+        identityStore = MockCredentialIdentityStore()
+        notificationCenterService = MockNotificationCenterService()
+        pasteboardService = MockPasteboardService()
+        stateService = MockStateService()
+        timeProvider = MockTimeProvider(.currentTime)
+        totpService = MockTOTPService()
+        vaultTimeoutService = MockVaultTimeoutService()
+
+        deviceAuthKeyService.deviceAuthKeyPublisherReturnValue = deviceAuthKeySubject.eraseToAnyPublisher()
+
+        subject = DefaultAutofillCredentialService(
+            appContextHelper: appContextHelper,
+            cipherService: cipherService,
+            clientService: clientService,
+            configService: configService,
+            credentialIdentityFactory: credentialIdentityFactory,
+            deviceAuthKeyService: deviceAuthKeyService,
+            errorReporter: errorReporter,
+            eventService: eventService,
+            fido2CredentialStore: fido2CredentialStore,
+            fido2UserInterfaceHelper: fido2UserInterfaceHelper,
+            flightRecorder: flightRecorder,
+            identityStore: identityStore,
+            notificationCenterService: notificationCenterService,
+            pasteboardService: pasteboardService,
+            stateService: stateService,
+            timeProvider: timeProvider,
+            totpService: totpService,
+            vaultTimeoutService: vaultTimeoutService,
+        )
+
+        // Wait for the `DefaultAutofillCredentialService.init` task to sync the initial set of
+        // identities for the active account, otherwise there's a potential race condition between
+        // that and the tests below.
+        waitFor { identityStore.removeAllCredentialIdentitiesCalled }
+        identityStore.removeAllCredentialIdentitiesCalled = false
+    }
+
+    override func tearDown() async throws {
+        try await super.tearDown()
+
+        appContextHelper = nil
+        autofillCredentialServiceDelegate = nil
+        cipherService = nil
+        clientService = nil
+        configService = nil
+        credentialIdentityFactory = nil
+        deviceAuthKeyService = nil
+        errorReporter = nil
+        eventService = nil
+        fido2UserInterfaceHelperDelegate = nil
+        fido2CredentialStore = nil
+        fido2UserInterfaceHelper = nil
+        flightRecorder = nil
+        identityStore = nil
+        notificationCenterService = nil
+        pasteboardService = nil
+        stateService = nil
+        timeProvider = nil
+        totpService = nil
+        subject = nil
+        vaultTimeoutService = nil
+    }
+
+    // MARK: Tests
+
+    /// `isAutofillCredentialsEnabled()` returns whether autofilling credentials is enabled.
+    func test_isAutofillCredentialsEnabled() async {
+        identityStore.state.mockIsEnabled = false
+        var isEnabled = await subject.isAutofillCredentialsEnabled()
+        XCTAssertFalse(isEnabled)
+
+        identityStore.state.mockIsEnabled = true
+        isEnabled = await subject.isAutofillCredentialsEnabled()
+        XCTAssertTrue(isEnabled)
+    }
+
+    /// `provideCredential(for:)` returns the credential containing the username and password for
+    /// the specified ID.
+    func test_provideCredential() async throws {
+        cipherService.fetchCipherResult = .success(
+            .fixture(login: .fixture(password: "password123", username: "user@bitwarden.com")),
+        )
+        stateService.activeAccount = .fixture()
+        vaultTimeoutService.isClientLocked["1"] = false
+
+        let credential = try await subject.provideCredential(
+            for: "1",
+            autofillCredentialServiceDelegate: autofillCredentialServiceDelegate,
+            repromptPasswordValidated: false,
+        )
+
+        XCTAssertEqual(credential.password, "password123")
+        XCTAssertEqual(credential.user, "user@bitwarden.com")
+        XCTAssertNil(pasteboardService.copiedString)
+    }
+
+    /// `provideCredential(for:)` throws an error if the cipher with the specified ID doesn't have a
+    /// username or password.
+    func test_provideCredential_cipherMissingUsernameOrPassword() async {
+        stateService.activeAccount = .fixture()
+        vaultTimeoutService.isClientLocked["1"] = false
+
+        cipherService.fetchCipherResult = .success(.fixture(type: .identity))
+        await assertAsyncThrows(error: ASExtensionError(.credentialIdentityNotFound)) {
+            _ = try await subject.provideCredential(
+                for: "1",
+                autofillCredentialServiceDelegate: autofillCredentialServiceDelegate,
+                repromptPasswordValidated: false,
+            )
+        }
+
+        cipherService.fetchCipherResult = .success(.fixture(login: .fixture(password: nil, username: "user@bitwarden")))
+        await assertAsyncThrows(error: ASExtensionError(.credentialIdentityNotFound)) {
+            _ = try await subject.provideCredential(
+                for: "1",
+                autofillCredentialServiceDelegate: autofillCredentialServiceDelegate,
+                repromptPasswordValidated: false,
+            )
+        }
+
+        cipherService.fetchCipherResult = .success(.fixture(login: .fixture(password: "test", username: nil)))
+        await assertAsyncThrows(error: ASExtensionError(.credentialIdentityNotFound)) {
+            _ = try await subject.provideCredential(
+                for: "1",
+                autofillCredentialServiceDelegate: autofillCredentialServiceDelegate,
+                repromptPasswordValidated: false,
+            )
+        }
+    }
+
+    /// `provideCredential(for:)` throws an error if a cipher with the specified ID doesn't exist.
+    func test_provideCredential_cipherNotFound() async {
+        stateService.activeAccount = .fixture()
+        vaultTimeoutService.isClientLocked["1"] = false
+
+        await assertAsyncThrows(error: ASExtensionError(.credentialIdentityNotFound)) {
+            _ = try await subject.provideCredential(
+                for: "1",
+                autofillCredentialServiceDelegate: autofillCredentialServiceDelegate,
+                repromptPasswordValidated: false,
+            )
+        }
+    }
+
+    /// `provideCredential(for:)` unlocks the user's vault if they use never lock.
+    func test_provideCredential_neverLock() async throws {
+        autofillCredentialServiceDelegate.unlockVaultWithNaverlockHandler = { [weak self] in
+            self?.vaultTimeoutService.isClientLocked["1"] = false
+        }
+        cipherService.fetchCipherResult = .success(
+            .fixture(login: .fixture(password: "password123", username: "user@bitwarden.com")),
+        )
+        stateService.activeAccount = .fixture()
+        vaultTimeoutService.isClientLocked["1"] = true
+        vaultTimeoutService.vaultTimeout["1"] = .never
+
+        let credential = try await subject.provideCredential(
+            for: "1",
+            autofillCredentialServiceDelegate: autofillCredentialServiceDelegate,
+            repromptPasswordValidated: false,
+        )
+
+        XCTAssertTrue(autofillCredentialServiceDelegate.unlockVaultWithNeverlockKeyCalled)
+        XCTAssertEqual(credential.password, "password123")
+        XCTAssertEqual(credential.user, "user@bitwarden.com")
+        XCTAssertNil(pasteboardService.copiedString)
+    }
+
+    /// `provideCredential(for:)` doesn't unlock the user's vault if they use never lock
+    /// but it has been manually locked.
+    func test_provideCredential_neverLockManuallyLocked() async throws {
+        autofillCredentialServiceDelegate.unlockVaultWithNaverlockHandler = { [weak self] in
+            self?.vaultTimeoutService.isClientLocked["1"] = false
+        }
+        cipherService.fetchCipherResult = .success(
+            .fixture(login: .fixture(password: "password123", username: "user@bitwarden.com")),
+        )
+        stateService.activeAccount = .fixture()
+        stateService.manuallyLockedAccounts["1"] = true
+        vaultTimeoutService.isClientLocked["1"] = true
+        vaultTimeoutService.vaultTimeout["1"] = .never
+
+        await assertAsyncThrows(error: ASExtensionError(.userInteractionRequired)) {
+            _ = try await subject.provideCredential(
+                for: "1",
+                autofillCredentialServiceDelegate: autofillCredentialServiceDelegate,
+                repromptPasswordValidated: false,
+            )
+        }
+        XCTAssertFalse(autofillCredentialServiceDelegate.unlockVaultWithNeverlockKeyCalled)
+    }
+
+    /// `provideCredential(for:)` throws an error if reprompt is required.
+    func test_provideCredential_repromptRequired() async throws {
+        stateService.activeAccount = .fixture()
+        vaultTimeoutService.isClientLocked["1"] = false
+
+        cipherService.fetchCipherResult = .success(
+            .fixture(
+                login: .fixture(
+                    password: "password123",
+                    username: "user@bitwarden.com",
+                ),
+                reprompt: .password,
+            ),
+        )
+        await assertAsyncThrows(error: ASExtensionError(.userInteractionRequired)) {
+            _ = try await subject.provideCredential(
+                for: "1",
+                autofillCredentialServiceDelegate: autofillCredentialServiceDelegate,
+                repromptPasswordValidated: false,
+            )
+        }
+    }
+
+    /// `provideCredential(for:)` copies the cipher's TOTP code when returning the credential.
+    func test_provideCredential_totpCopy() async throws {
+        cipherService.fetchCipherResult = .success(
+            .fixture(login: .fixture(
+                password: "password123",
+                username: "user@bitwarden.com",
+                totp: "totp",
+            )),
+        )
+        stateService.activeAccount = .fixture()
+        vaultTimeoutService.isClientLocked["1"] = false
+
+        let credential = try await subject.provideCredential(
+            for: "1",
+            autofillCredentialServiceDelegate: autofillCredentialServiceDelegate,
+            repromptPasswordValidated: false,
+        )
+
+        XCTAssertEqual(credential.password, "password123")
+        XCTAssertEqual(credential.user, "user@bitwarden.com")
+        XCTAssertTrue(totpService.copyTotpIfPossibleCalled)
+    }
+
+    /// `provideCredential(for:)` attempting to copy the cipher's TOTP code when returning the credential
+    /// throws when gettning if active account has Premium thus it gets logged by the reporter
+    /// but the credential is still returned.
+    func test_provideCredential_totpCopyThrows() async throws {
+        cipherService.fetchCipherResult = .success(
+            .fixture(login: .fixture(
+                password: "password123",
+                username: "user@bitwarden.com",
+                totp: "totp",
+            )),
+        )
+        stateService.activeAccount = .fixture()
+        vaultTimeoutService.isClientLocked["1"] = false
+        totpService.copyTotpIfPossibleError = BitwardenTestError.example
+
+        let credential = try await subject.provideCredential(
+            for: "1",
+            autofillCredentialServiceDelegate: autofillCredentialServiceDelegate,
+            repromptPasswordValidated: false,
+        )
+
+        XCTAssertEqual(credential.password, "password123")
+        XCTAssertEqual(credential.user, "user@bitwarden.com")
+        XCTAssertTrue(totpService.copyTotpIfPossibleCalled)
+        XCTAssertEqual(errorReporter.errors as? [BitwardenTestError], [.example])
+    }
+
+    /// `provideCredential(for:)` throws an error if the user's vault is locked.
+    func test_provideCredential_vaultLocked() async {
+        stateService.activeAccount = .fixture()
+        vaultTimeoutService.isClientLocked["1"] = true
+
+        await assertAsyncThrows(error: ASExtensionError(.userInteractionRequired)) {
+            _ = try await subject.provideCredential(
+                for: "1",
+                autofillCredentialServiceDelegate: autofillCredentialServiceDelegate,
+                repromptPasswordValidated: false,
+            )
+        }
+    }
+
+    /// `provideFido2Credential(for:autofillCredentialServiceDelegate:fido2UserVerificationMediatorDelegate:)`
+    /// succeeds.
+    @available(iOS 17.0, *)
+    func test_provideFido2Credential_succeeds() async throws {
+        stateService.activeAccount = .fixture()
+        vaultTimeoutService.isClientLocked["1"] = false
+        let passkeyIdentity = ASPasskeyCredentialIdentity.fixture()
+        let passkeyRequest = ASPasskeyCredentialRequest.fixture(credentialIdentity: passkeyIdentity)
+        let expectedAssertionResult = GetAssertionResult.fixture()
+
+        fido2AuthenticatorMock.getAssertionReturnValue = expectedAssertionResult
+
+        let result = try await subject.provideFido2Credential(
+            for: passkeyRequest,
+            autofillCredentialServiceDelegate: autofillCredentialServiceDelegate,
+            fido2UserInterfaceHelperDelegate: fido2UserInterfaceHelperDelegate,
+        )
+
+        XCTAssertFalse(autofillCredentialServiceDelegate.unlockVaultWithNeverlockKeyCalled)
+        XCTAssertEqual(fido2UserInterfaceHelper.userVerificationPreferenceSetup, .discouraged)
+
+        XCTAssertTrue(totpService.copyTotpIfPossibleCalled)
+        XCTAssertTrue(errorReporter.errors.isEmpty)
+
+        XCTAssertEqual(result.userHandle, expectedAssertionResult.userHandle)
+        XCTAssertEqual(result.relyingParty, passkeyIdentity.relyingPartyIdentifier)
+        XCTAssertEqual(result.signature, expectedAssertionResult.signature)
+        XCTAssertEqual(result.clientDataHash, passkeyRequest.clientDataHash)
+        XCTAssertEqual(result.authenticatorData, expectedAssertionResult.authenticatorData)
+        XCTAssertEqual(result.credentialID, expectedAssertionResult.credentialId)
+
+        let receivedRequest = fido2AuthenticatorMock.getAssertionReceivedRequest
+        XCTAssertEqual(receivedRequest?.rpId, passkeyIdentity.relyingPartyIdentifier)
+        XCTAssertEqual(receivedRequest?.clientDataHash, passkeyRequest.clientDataHash)
+        XCTAssertEqual(receivedRequest?.allowList?[0].id, passkeyIdentity.credentialID)
+        XCTAssertEqual(receivedRequest?.allowList?[0].ty, "public-key")
+        XCTAssertNil(receivedRequest?.allowList?[0].transports)
+        XCTAssertEqual(receivedRequest?.options.rk, false)
+        XCTAssertEqual(receivedRequest?.options.uv, .discouraged)
+        XCTAssertNil(receivedRequest?.extensions)
+    }
+
+    /// `provideFido2Credential(for:autofillCredentialServiceDelegate:fido2UserVerificationMediatorDelegate:)`
+    /// attempting to copy the cipher's TOTP code when returning the credential
+    /// throws when gettning if active account has Premium thus it gets logged by the reporter
+    /// but the credential is still returned.
+    @available(iOS 17.0, *)
+    func test_provideFido2Credential_totpCopyThrows() async throws {
+        stateService.activeAccount = .fixture()
+        vaultTimeoutService.isClientLocked["1"] = false
+        let passkeyIdentity = ASPasskeyCredentialIdentity.fixture()
+        let passkeyRequest = ASPasskeyCredentialRequest.fixture(credentialIdentity: passkeyIdentity)
+        let expectedAssertionResult = GetAssertionResult.fixture(
+            selectedCredential: .fixture(
+                cipherView: .fixture(
+                    login: .fixture(
+                        totp: "totp",
+                    ),
+                ),
+            ),
+        )
+        totpService.copyTotpIfPossibleError = BitwardenTestError.example
+        fido2AuthenticatorMock.getAssertionReturnValue = expectedAssertionResult
+
+        let result = try await subject.provideFido2Credential(
+            for: passkeyRequest,
+            autofillCredentialServiceDelegate: autofillCredentialServiceDelegate,
+            fido2UserInterfaceHelperDelegate: fido2UserInterfaceHelperDelegate,
+        )
+
+        XCTAssertFalse(autofillCredentialServiceDelegate.unlockVaultWithNeverlockKeyCalled)
+        XCTAssertEqual(fido2UserInterfaceHelper.userVerificationPreferenceSetup, .discouraged)
+
+        XCTAssertEqual(result.userHandle, expectedAssertionResult.userHandle)
+        XCTAssertEqual(result.relyingParty, passkeyIdentity.relyingPartyIdentifier)
+        XCTAssertEqual(result.signature, expectedAssertionResult.signature)
+        XCTAssertEqual(result.clientDataHash, passkeyRequest.clientDataHash)
+        XCTAssertEqual(result.authenticatorData, expectedAssertionResult.authenticatorData)
+        XCTAssertEqual(result.credentialID, expectedAssertionResult.credentialId)
+        XCTAssertTrue(totpService.copyTotpIfPossibleCalled)
+        XCTAssertEqual(errorReporter.errors as? [BitwardenTestError], [.example])
+
+        let receivedRequest = fido2AuthenticatorMock.getAssertionReceivedRequest
+        XCTAssertEqual(receivedRequest?.rpId, passkeyIdentity.relyingPartyIdentifier)
+        XCTAssertEqual(receivedRequest?.clientDataHash, passkeyRequest.clientDataHash)
+        XCTAssertEqual(receivedRequest?.allowList?[0].id, passkeyIdentity.credentialID)
+        XCTAssertEqual(receivedRequest?.allowList?[0].ty, "public-key")
+        XCTAssertNil(receivedRequest?.allowList?[0].transports)
+        XCTAssertEqual(receivedRequest?.options.rk, false)
+        XCTAssertEqual(receivedRequest?.options.uv, .discouraged)
+        XCTAssertNil(receivedRequest?.extensions)
+    }
+
+    /// `provideFido2Credential(for:autofillCredentialServiceDelegate:fido2UserVerificationMediatorDelegate:)`
+    /// succeeds when unlocking with never key.
+    @available(iOS 17.0, *)
+    func test_provideFido2Credential_succeedsWithUnlockingNeverKey() async throws {
+        autofillCredentialServiceDelegate.unlockVaultWithNaverlockHandler = { [weak self] in
+            self?.vaultTimeoutService.isClientLocked["1"] = false
+        }
+        stateService.activeAccount = .fixture()
+        vaultTimeoutService.isClientLocked["1"] = true
+        vaultTimeoutService.vaultTimeout["1"] = .never
+
+        let passkeyIdentity = ASPasskeyCredentialIdentity.fixture()
+        let passkeyRequest = ASPasskeyCredentialRequest.fixture(credentialIdentity: passkeyIdentity)
+        let expectedAssertionResult = GetAssertionResult.fixture()
+
+        fido2AuthenticatorMock.getAssertionReturnValue = expectedAssertionResult
+
+        let result = try await subject.provideFido2Credential(
+            for: passkeyRequest,
+            autofillCredentialServiceDelegate: autofillCredentialServiceDelegate,
+            fido2UserInterfaceHelperDelegate: fido2UserInterfaceHelperDelegate,
+        )
+
+        XCTAssertTrue(autofillCredentialServiceDelegate.unlockVaultWithNeverlockKeyCalled)
+
+        XCTAssertNotNil(fido2UserInterfaceHelper.fido2UserInterfaceHelperDelegate)
+        XCTAssertEqual(fido2UserInterfaceHelper.userVerificationPreferenceSetup, .discouraged)
+
+        XCTAssertEqual(result.userHandle, expectedAssertionResult.userHandle)
+        XCTAssertEqual(result.relyingParty, passkeyIdentity.relyingPartyIdentifier)
+        XCTAssertEqual(result.signature, expectedAssertionResult.signature)
+        XCTAssertEqual(result.clientDataHash, passkeyRequest.clientDataHash)
+        XCTAssertEqual(result.authenticatorData, expectedAssertionResult.authenticatorData)
+        XCTAssertEqual(result.credentialID, expectedAssertionResult.credentialId)
+
+        let receivedRequest = fido2AuthenticatorMock.getAssertionReceivedRequest
+        XCTAssertEqual(receivedRequest?.rpId, passkeyIdentity.relyingPartyIdentifier)
+        XCTAssertEqual(receivedRequest?.clientDataHash, passkeyRequest.clientDataHash)
+        XCTAssertEqual(receivedRequest?.allowList?[0].id, passkeyIdentity.credentialID)
+        XCTAssertEqual(receivedRequest?.allowList?[0].ty, "public-key")
+        XCTAssertNil(receivedRequest?.allowList?[0].transports)
+        XCTAssertEqual(receivedRequest?.options.rk, false)
+        XCTAssertEqual(receivedRequest?.options.uv, .discouraged)
+        XCTAssertNil(receivedRequest?.extensions)
+    }
+
+    /// `provideFido2Credential(for:autofillCredentialServiceDelegate:fido2UserVerificationMediatorDelegate:)`
+    /// throws when unlocking with never key but is manually locked.
+    @available(iOS 17.0, *)
+    func test_provideFido2Credential_throwsWithUnlockingNeverKeyAndManuallyLocked() async throws {
+        autofillCredentialServiceDelegate.unlockVaultWithNaverlockHandler = { [weak self] in
+            self?.vaultTimeoutService.isClientLocked["1"] = false
+        }
+        stateService.activeAccount = .fixture()
+        stateService.manuallyLockedAccounts["1"] = true
+        vaultTimeoutService.isClientLocked["1"] = true
+        vaultTimeoutService.vaultTimeout["1"] = .never
+
+        let passkeyIdentity = ASPasskeyCredentialIdentity.fixture()
+        let passkeyRequest = ASPasskeyCredentialRequest.fixture(credentialIdentity: passkeyIdentity)
+
+        await assertAsyncThrows(error: Fido2Error.userInteractionRequired) {
+            _ = try await subject.provideFido2Credential(
+                for: passkeyRequest,
+                autofillCredentialServiceDelegate: autofillCredentialServiceDelegate,
+                fido2UserInterfaceHelperDelegate: fido2UserInterfaceHelperDelegate,
+            )
+        }
+        XCTAssertFalse(autofillCredentialServiceDelegate.unlockVaultWithNeverlockKeyCalled)
+    }
+
+    /// `provideFido2Credential(for:autofillCredentialServiceDelegate:fido2UserVerificationMediatorDelegate:)`
+    /// succeeds when unlocking with never key.
+    @available(iOS 17.0, *)
+    func test_provideFido2Credential_succeedsWithVaultUnlocked() async throws {
+        stateService.activeAccount = .fixture()
+        vaultTimeoutService.isClientLocked["1"] = false
+
+        let passkeyIdentity = ASPasskeyCredentialIdentity.fixture()
+        let passkeyRequest = ASPasskeyCredentialRequest.fixture(credentialIdentity: passkeyIdentity)
+        let expectedAssertionResult = GetAssertionResult.fixture()
+
+        fido2AuthenticatorMock.getAssertionReturnValue = expectedAssertionResult
+
+        let result = try await subject.provideFido2Credential(
+            for: passkeyRequest,
+            autofillCredentialServiceDelegate: autofillCredentialServiceDelegate,
+            fido2UserInterfaceHelperDelegate: fido2UserInterfaceHelperDelegate,
+        )
+
+        XCTAssertFalse(autofillCredentialServiceDelegate.unlockVaultWithNeverlockKeyCalled)
+
+        XCTAssertNotNil(fido2UserInterfaceHelper.fido2UserInterfaceHelperDelegate)
+        XCTAssertEqual(fido2UserInterfaceHelper.userVerificationPreferenceSetup, .discouraged)
+
+        XCTAssertEqual(result.userHandle, expectedAssertionResult.userHandle)
+        XCTAssertEqual(result.relyingParty, passkeyIdentity.relyingPartyIdentifier)
+        XCTAssertEqual(result.signature, expectedAssertionResult.signature)
+        XCTAssertEqual(result.clientDataHash, passkeyRequest.clientDataHash)
+        XCTAssertEqual(result.authenticatorData, expectedAssertionResult.authenticatorData)
+        XCTAssertEqual(result.credentialID, expectedAssertionResult.credentialId)
+
+        let receivedRequest = fido2AuthenticatorMock.getAssertionReceivedRequest
+        XCTAssertEqual(receivedRequest?.rpId, passkeyIdentity.relyingPartyIdentifier)
+        XCTAssertEqual(receivedRequest?.clientDataHash, passkeyRequest.clientDataHash)
+        XCTAssertEqual(receivedRequest?.allowList?[0].id, passkeyIdentity.credentialID)
+        XCTAssertEqual(receivedRequest?.allowList?[0].ty, "public-key")
+        XCTAssertNil(receivedRequest?.allowList?[0].transports)
+        XCTAssertEqual(receivedRequest?.options.rk, false)
+        XCTAssertEqual(receivedRequest?.options.uv, .discouraged)
+        XCTAssertNil(receivedRequest?.extensions)
+    }
+
+    /// `provideFido2Credential(for:autofillCredentialServiceDelegate:fido2UserVerificationMediatorDelegate:)`
+    /// throws when no active user.
+    @available(iOS 17.0, *)
+    func test_provideFido2Credential_throwsNoActiveUser() async throws {
+        stateService.activeAccount = nil
+
+        let passkeyIdentity = ASPasskeyCredentialIdentity.fixture()
+        let passkeyRequest = ASPasskeyCredentialRequest.fixture(credentialIdentity: passkeyIdentity)
+
+        fido2AuthenticatorMock.getAssertionThrowableError = BitwardenTestError.example
+
+        await assertAsyncThrows(error: StateServiceError.noActiveAccount) {
+            _ = try await subject.provideFido2Credential(
+                for: passkeyRequest,
+                autofillCredentialServiceDelegate: autofillCredentialServiceDelegate,
+                fido2UserInterfaceHelperDelegate: fido2UserInterfaceHelperDelegate,
+            )
+        }
+    }
+
+    /// `provideFido2Credential(for:autofillCredentialServiceDelegate:fido2UserVerificationMediatorDelegate:)`
+    /// throws when needing user interaction.
+    @available(iOS 17.0, *)
+    func test_provideFido2Credential_throwsNeedingUserInteraction() async throws {
+        stateService.activeAccount = .fixture()
+        vaultTimeoutService.isClientLocked["1"] = true
+
+        let passkeyIdentity = ASPasskeyCredentialIdentity.fixture()
+        let passkeyRequest = ASPasskeyCredentialRequest.fixture(credentialIdentity: passkeyIdentity)
+
+        fido2AuthenticatorMock.getAssertionThrowableError = BitwardenTestError.example
+
+        await assertAsyncThrows(error: Fido2Error.userInteractionRequired) {
+            _ = try await subject.provideFido2Credential(
+                for: passkeyRequest,
+                autofillCredentialServiceDelegate: autofillCredentialServiceDelegate,
+                fido2UserInterfaceHelperDelegate: fido2UserInterfaceHelperDelegate,
+            )
+        }
+    }
+
+    /// `provideFido2Credential(for:autofillCredentialServiceDelegate:fido2UserVerificationMediatorDelegate:)`
+    /// throws when getting assertion with vault unlocked.
+    @available(iOS 17.0, *)
+    func test_provideFido2Credential_throwsGettingAssertion() async throws {
+        stateService.activeAccount = .fixture()
+        vaultTimeoutService.isClientLocked["1"] = false
+
+        let passkeyIdentity = ASPasskeyCredentialIdentity.fixture()
+        let passkeyRequest = ASPasskeyCredentialRequest.fixture(credentialIdentity: passkeyIdentity)
+
+        fido2AuthenticatorMock.getAssertionThrowableError = BitwardenTestError.example
+
+        await assertAsyncThrows(error: BitwardenTestError.example) {
+            _ = try await subject.provideFido2Credential(
+                for: passkeyRequest,
+                autofillCredentialServiceDelegate: autofillCredentialServiceDelegate,
+                fido2UserInterfaceHelperDelegate: fido2UserInterfaceHelperDelegate,
+            )
+        }
+    }
+
+    /// `provideFido2Credential(for:fido2UserVerificationMediatorDelegate:)`
+    /// succeeds.
+    @available(iOS 17.0, *)
+    func test_provideFido2Credential_passkeyRequestParameters_succeeds() async throws {
+        stateService.activeAccount = .fixture()
+        vaultTimeoutService.isClientLocked["1"] = false
+        let allowedCredentials = [
+            Data(repeating: 2, count: 32),
+            Data(repeating: 5, count: 32),
+        ]
+        let passkeyParameters = MockPasskeyCredentialRequestParameters(allowedCredentials: allowedCredentials)
+        let expectedAssertionResult = GetAssertionResult.fixture()
+
+        fido2AuthenticatorMock.getAssertionReturnValue = expectedAssertionResult
+
+        let result = try await subject.provideFido2Credential(
+            for: passkeyParameters,
+            fido2UserInterfaceHelperDelegate: fido2UserInterfaceHelperDelegate,
+        )
+        XCTAssertEqual(fido2UserInterfaceHelper.userVerificationPreferenceSetup, .preferred)
+
+        XCTAssertEqual(result.userHandle, expectedAssertionResult.userHandle)
+        XCTAssertEqual(result.relyingParty, passkeyParameters.relyingPartyIdentifier)
+        XCTAssertEqual(result.signature, expectedAssertionResult.signature)
+        XCTAssertEqual(result.clientDataHash, passkeyParameters.clientDataHash)
+        XCTAssertEqual(result.authenticatorData, expectedAssertionResult.authenticatorData)
+        XCTAssertEqual(result.credentialID, expectedAssertionResult.credentialId)
+
+        let receivedRequest = fido2AuthenticatorMock.getAssertionReceivedRequest
+        XCTAssertEqual(receivedRequest?.rpId, passkeyParameters.relyingPartyIdentifier)
+        XCTAssertEqual(receivedRequest?.clientDataHash, passkeyParameters.clientDataHash)
+        XCTAssertEqual(
+            receivedRequest?.allowList,
+            allowedCredentials.map { credentialId in
+                PublicKeyCredentialDescriptor(ty: "public-key", id: credentialId, transports: nil)
+            },
+        )
+        XCTAssertEqual(receivedRequest?.options.rk, false)
+        XCTAssertEqual(receivedRequest?.options.uv, .preferred)
+        XCTAssertNil(receivedRequest?.extensions)
+    }
+
+    /// `provideFido2Credential(for:fido2UserVerificationMediatorDelegate:)`
+    /// throws when getting assertion.
+    @available(iOS 17.0, *)
+    func test_provideFido2Credential_passkeyRequestParameters_throwsGettingAssertion() async throws {
+        stateService.activeAccount = .fixture()
+        vaultTimeoutService.isClientLocked["1"] = false
+
+        let passkeyParameters = MockPasskeyCredentialRequestParameters()
+
+        fido2AuthenticatorMock.getAssertionThrowableError = BitwardenTestError.example
+
+        await assertAsyncThrows(error: BitwardenTestError.example) {
+            _ = try await subject.provideFido2Credential(
+                for: passkeyParameters,
+                fido2UserInterfaceHelperDelegate: fido2UserInterfaceHelperDelegate,
+            )
+        }
+    }
+
+    /// `provideFido2Credential(for:autofillCredentialServiceDelegate:fido2UserVerificationMediatorDelegate:)`
+    /// succeeds with device auth key.
+    func test_provideFido2Credential_succeeds_deviceAuthKey() async throws {
+        guard #available(iOS 18.0, *) else {
+            throw XCTSkip("Skipped on iOS < 18.0")
+        }
+        stateService.activeAccount = .fixture()
+        configService.featureFlagsBool[.deviceAuthKey] = true
+        let passkeyIdentity = ASPasskeyCredentialIdentity.fixture(
+            recordIdentifier: "dak-record-identifier",
+        )
+        let passkeyRequest = ASPasskeyCredentialRequest.fixture(credentialIdentity: passkeyIdentity)
+        let expectedAssertionResult = GetAssertionResult(
+            credentialId: Data(repeating: 2, count: 3),
+            authenticatorData: Data(repeating: 2, count: 4),
+            signature: Data(repeating: 2, count: 5),
+            userHandle: Data(repeating: 2, count: 6),
+            selectedCredential: SelectedCredential.fixture(),
+            extensions: GetAssertionExtensionsOutput(
+                prf: GetAssertionPrfOutput(
+                    results: PrfOutputValues(
+                        first: Data(repeating: 1, count: 32),
+                        second: nil,
+                    ),
+                ),
+            ),
+        )
+
+        deviceAuthKeyService.getDeviceAuthKeyMetadataReturnValue = DeviceAuthKeyKeychainMetadata.fixture(
+            cipherId: "dak-record-identifier",
+        )
+
+        deviceAuthKeyService.assertDeviceAuthKeyReturnValue = expectedAssertionResult
+        fido2AuthenticatorMock.getAssertionThrowableError = BitwardenTestError.example
+
+        let result = try await subject.provideFido2Credential(
+            for: passkeyRequest,
+            autofillCredentialServiceDelegate: autofillCredentialServiceDelegate,
+            fido2UserInterfaceHelperDelegate: fido2UserInterfaceHelperDelegate,
+        )
+
+        XCTAssertTrue(errorReporter.errors.isEmpty)
+
+        XCTAssertEqual(result.userHandle, expectedAssertionResult.userHandle)
+        XCTAssertEqual(result.relyingParty, passkeyIdentity.relyingPartyIdentifier)
+        XCTAssertEqual(result.signature, expectedAssertionResult.signature)
+        XCTAssertEqual(result.clientDataHash, passkeyRequest.clientDataHash)
+        XCTAssertEqual(result.authenticatorData, expectedAssertionResult.authenticatorData)
+        XCTAssertEqual(result.credentialID, expectedAssertionResult.credentialId)
+
+        // TODO: PM-26177 once SDK is updated for full PRF support we can include this
+        XCTAssertNil(result.extensionOutput)
+    }
+
+    /// `provideFido2Credential(for:autofillCredentialServiceDelegate:fido2UserVerificationMediatorDelegate:)`
+    /// skips device auth key logic if the feature flag is off.
+    func test_provideFido2Credential_skips_deviceAuthKey_featureFlagOff() async throws {
+        guard #available(iOS 18.0, *) else {
+            throw XCTSkip("Skipped on iOS < 18.0")
+        }
+        stateService.activeAccount = .fixture()
+        configService.featureFlagsBool[.deviceAuthKey] = false
+        let passkeyIdentity = ASPasskeyCredentialIdentity.fixture(
+            recordIdentifier: "dak-record-identifier",
+        )
+        let passkeyRequest = ASPasskeyCredentialRequest.fixture(credentialIdentity: passkeyIdentity)
+        let expectedAssertionResult = GetAssertionResult(
+            credentialId: Data(repeating: 2, count: 3),
+            authenticatorData: Data(repeating: 2, count: 4),
+            signature: Data(repeating: 2, count: 5),
+            userHandle: Data(repeating: 2, count: 6),
+            selectedCredential: SelectedCredential.fixture(),
+            extensions: GetAssertionExtensionsOutput(prf: nil),
+        )
+
+        deviceAuthKeyService.getDeviceAuthKeyMetadataReturnValue = DeviceAuthKeyKeychainMetadata.fixture(
+            cipherId: "dak-record-identifier",
+        )
+
+        deviceAuthKeyService.assertDeviceAuthKeyReturnValue = expectedAssertionResult
+        fido2AuthenticatorMock.getAssertionReturnValue = expectedAssertionResult
+
+        _ = try await subject.provideFido2Credential(
+            for: passkeyRequest,
+            autofillCredentialServiceDelegate: autofillCredentialServiceDelegate,
+            fido2UserInterfaceHelperDelegate: fido2UserInterfaceHelperDelegate,
+        )
+
+        XCTAssertFalse(deviceAuthKeyService.getDeviceAuthKeyMetadataCalled)
+        XCTAssertFalse(deviceAuthKeyService.assertDeviceAuthKeyCalled)
+    }
+
+    /// `provideOTPCredential(for:autofillCredentialServiceDelegate:repromptPasswordValidated:)`
+    /// returns the credential containing the TOTP code for the specified ID.
+    func test_provideOTPCredential() async throws {
+        guard #available(iOS 18.0, *) else {
+            throw XCTSkip("Skipped on iOS < 18.0")
+        }
+        cipherService.fetchCipherResult = .success(
+            .fixture(login: .fixture(totp: "totpKey")),
+        )
+        stateService.activeAccount = .fixture()
+        vaultTimeoutService.isClientLocked["1"] = false
+        clientService.mockVault.generateTOTPCodeResult = .success("123456")
+
+        let credential = try await subject.provideOTPCredential(
+            for: "1",
+            autofillCredentialServiceDelegate: autofillCredentialServiceDelegate,
+            repromptPasswordValidated: false,
+        )
+
+        XCTAssertEqual(credential.code, "123456")
+    }
+
+    /// `provideOTPCredential(for:autofillCredentialServiceDelegate:repromptPasswordValidated:)`
+    /// throws an error if the cipher with the specified ID doesn't have a totp.
+    func test_provideOTPCredential_cipherMissingTOTP() async throws {
+        guard #available(iOS 18.0, *) else {
+            throw XCTSkip("Skipped on iOS < 18.0")
+        }
+        stateService.activeAccount = .fixture()
+        vaultTimeoutService.isClientLocked["1"] = false
+
+        cipherService.fetchCipherResult = .success(.fixture(type: .identity))
+        await assertAsyncThrows(error: ASExtensionError(.credentialIdentityNotFound)) {
+            _ = try await subject.provideOTPCredential(
+                for: "1",
+                autofillCredentialServiceDelegate: autofillCredentialServiceDelegate,
+                repromptPasswordValidated: false,
+            )
+        }
+
+        cipherService.fetchCipherResult = .success(.fixture(login: .fixture(totp: nil)))
+        await assertAsyncThrows(error: ASExtensionError(.credentialIdentityNotFound)) {
+            _ = try await subject.provideOTPCredential(
+                for: "1",
+                autofillCredentialServiceDelegate: autofillCredentialServiceDelegate,
+                repromptPasswordValidated: false,
+            )
+        }
+
+        cipherService.fetchCipherResult = .success(.fixture(login: nil))
+        await assertAsyncThrows(error: ASExtensionError(.credentialIdentityNotFound)) {
+            _ = try await subject.provideOTPCredential(
+                for: "1",
+                autofillCredentialServiceDelegate: autofillCredentialServiceDelegate,
+                repromptPasswordValidated: false,
+            )
+        }
+    }
+
+    /// `provideOTPCredential(for:autofillCredentialServiceDelegate:repromptPasswordValidated:)`
+    /// throws an error if a cipher with the specified ID doesn't exist.
+    func test_provideOTPCredential_cipherNotFound() async throws {
+        guard #available(iOS 18.0, *) else {
+            throw XCTSkip("Skipped on iOS < 18.0")
+        }
+        stateService.activeAccount = .fixture()
+        vaultTimeoutService.isClientLocked["1"] = false
+
+        await assertAsyncThrows(error: ASExtensionError(.credentialIdentityNotFound)) {
+            _ = try await subject.provideOTPCredential(
+                for: "1",
+                autofillCredentialServiceDelegate: autofillCredentialServiceDelegate,
+                repromptPasswordValidated: false,
+            )
+        }
+    }
+
+    /// `provideOTPCredential(for:autofillCredentialServiceDelegate:repromptPasswordValidated:)`
+    ///  unlocks the user's vault if they use never lock.
+    func test_provideOTPCredential_neverLock() async throws {
+        guard #available(iOS 18.0, *) else {
+            throw XCTSkip("Skipped on iOS < 18.0")
+        }
+        autofillCredentialServiceDelegate.unlockVaultWithNaverlockHandler = { [weak self] in
+            self?.vaultTimeoutService.isClientLocked["1"] = false
+        }
+        cipherService.fetchCipherResult = .success(
+            .fixture(login: .fixture(totp: "totpKey")),
+        )
+        stateService.activeAccount = .fixture()
+        vaultTimeoutService.isClientLocked["1"] = true
+        vaultTimeoutService.vaultTimeout["1"] = .never
+        clientService.mockVault.generateTOTPCodeResult = .success("123456")
+
+        let credential = try await subject.provideOTPCredential(
+            for: "1",
+            autofillCredentialServiceDelegate: autofillCredentialServiceDelegate,
+            repromptPasswordValidated: false,
+        )
+
+        XCTAssertEqual(credential.code, "123456")
+        XCTAssertTrue(autofillCredentialServiceDelegate.unlockVaultWithNeverlockKeyCalled)
+    }
+
+    /// `provideOTPCredential(for:autofillCredentialServiceDelegate:repromptPasswordValidated:)`
+    /// doesn't unlock the user's vault if they use never lock but it has been manually locked.
+    func test_provideOTPCredential_neverLockManuallyLocked() async throws {
+        guard #available(iOS 18.0, *) else {
+            throw XCTSkip("Skipped on iOS < 18.0")
+        }
+        autofillCredentialServiceDelegate.unlockVaultWithNaverlockHandler = { [weak self] in
+            self?.vaultTimeoutService.isClientLocked["1"] = false
+        }
+        cipherService.fetchCipherResult = .success(
+            .fixture(login: .fixture(totp: "totpKey")),
+        )
+        stateService.activeAccount = .fixture()
+        stateService.manuallyLockedAccounts["1"] = true
+        vaultTimeoutService.isClientLocked["1"] = true
+        vaultTimeoutService.vaultTimeout["1"] = .never
+
+        await assertAsyncThrows(error: ASExtensionError(.userInteractionRequired)) {
+            _ = try await subject.provideOTPCredential(
+                for: "1",
+                autofillCredentialServiceDelegate: autofillCredentialServiceDelegate,
+                repromptPasswordValidated: false,
+            )
+        }
+        XCTAssertFalse(autofillCredentialServiceDelegate.unlockVaultWithNeverlockKeyCalled)
+    }
+
+    /// `provideOTPCredential(for:autofillCredentialServiceDelegate:repromptPasswordValidated:)`
+    /// throws an error if reprompt is required.
+    func test_provideOTPCredential_repromptRequired() async throws {
+        guard #available(iOS 18.0, *) else {
+            throw XCTSkip("Skipped on iOS < 18.0")
+        }
+        stateService.activeAccount = .fixture()
+        vaultTimeoutService.isClientLocked["1"] = false
+
+        cipherService.fetchCipherResult = .success(
+            .fixture(
+                login: .fixture(
+                    totp: "totpKey",
+                ),
+                reprompt: .password,
+            ),
+        )
+        await assertAsyncThrows(error: ASExtensionError(.userInteractionRequired)) {
+            _ = try await subject.provideOTPCredential(
+                for: "1",
+                autofillCredentialServiceDelegate: autofillCredentialServiceDelegate,
+                repromptPasswordValidated: false,
+            )
+        }
+    }
+
+    /// `provideOTPCredential(for:autofillCredentialServiceDelegate:repromptPasswordValidated:)`
+    /// succeeds when the user is authorized to use TOTP.
+    func test_provideOTPCredential_totpAuthorized() async throws {
+        guard #available(iOS 18.0, *) else {
+            throw XCTSkip("Skipped on iOS < 18.0")
+        }
+        cipherService.fetchCipherResult = .success(
+            .fixture(login: .fixture(totp: "totpKey")),
+        )
+        stateService.activeAccount = .fixture()
+        vaultTimeoutService.isClientLocked["1"] = false
+        clientService.mockVault.generateTOTPCodeResult = .success("123456")
+        totpService.isTotpAuthorizedResult = true
+
+        let credential = try await subject.provideOTPCredential(
+            for: "1",
+            autofillCredentialServiceDelegate: autofillCredentialServiceDelegate,
+            repromptPasswordValidated: false,
+        )
+
+        XCTAssertEqual(credential.code, "123456")
+    }
+
+    /// `provideOTPCredential(for:autofillCredentialServiceDelegate:repromptPasswordValidated:)`
+    /// throws an error if the user is not authorized to use TOTP.
+    func test_provideOTPCredential_totpNotAuthorized() async throws {
+        guard #available(iOS 18.0, *) else {
+            throw XCTSkip("Skipped on iOS < 18.0")
+        }
+        cipherService.fetchCipherResult = .success(
+            .fixture(login: .fixture(totp: "totpKey")),
+        )
+        stateService.activeAccount = .fixture()
+        vaultTimeoutService.isClientLocked["1"] = false
+        totpService.isTotpAuthorizedResult = false
+
+        await assertAsyncThrows(error: ASExtensionError(.credentialIdentityNotFound)) {
+            _ = try await subject.provideOTPCredential(
+                for: "1",
+                autofillCredentialServiceDelegate: autofillCredentialServiceDelegate,
+                repromptPasswordValidated: false,
+            )
+        }
+    }
+
+    /// `provideOTPCredential(for:autofillCredentialServiceDelegate:repromptPasswordValidated:)`
+    /// throws an error if the user's vault is locked.
+    func test_provideOTPCredential_vaultLocked() async throws {
+        guard #available(iOS 18.0, *) else {
+            throw XCTSkip("Skipped on iOS < 18.0")
+        }
+        stateService.activeAccount = .fixture()
+        vaultTimeoutService.isClientLocked["1"] = true
+
+        await assertAsyncThrows(error: ASExtensionError(.userInteractionRequired)) {
+            _ = try await subject.provideOTPCredential(
+                for: "1",
+                autofillCredentialServiceDelegate: autofillCredentialServiceDelegate,
+                repromptPasswordValidated: false,
+            )
+        }
+    }
+
+    /// `provideOTPCredential(for:autofillCredentialServiceDelegate:repromptPasswordValidated:)`
+    ///  throws when generating TOTP code.
+    func test_provideOTPCredential_throwsGeneratingTOTPCode() async throws {
+        guard #available(iOS 18.0, *) else {
+            throw XCTSkip("Skipped on iOS < 18.0")
+        }
+        cipherService.fetchCipherResult = .success(
+            .fixture(login: .fixture(totp: "totpKey")),
+        )
+        stateService.activeAccount = .fixture()
+        vaultTimeoutService.isClientLocked["1"] = false
+        clientService.mockVault.generateTOTPCodeResult = .failure(BitwardenTestError.example)
+
+        await assertAsyncThrows(error: ASExtensionError(.credentialIdentityNotFound)) {
+            _ = try await subject.provideOTPCredential(
+                for: "1",
+                autofillCredentialServiceDelegate: autofillCredentialServiceDelegate,
+                repromptPasswordValidated: false,
+            )
+        }
+    }
+
+    /// `syncIdentities(vaultLockStatus:)` updates the credential identity store with the identities
+    /// from the user's vault.
+    func test_syncIdentities() { // swiftlint:disable:this function_body_length
+        cipherService.fetchAllCiphersResult = .success([
+            .fixture(
+                id: "1",
+                login: .fixture(
+                    password: "password123",
+                    uris: [.fixture(uri: "bitwarden.com")],
+                    username: "user@bitwarden.com",
+                ),
+            ),
+            .fixture(id: "2", type: .identity),
+            .fixture(
+                id: "3",
+                login: .fixture(
+                    password: "123321",
+                    uris: [.fixture(uri: "example.com")],
+                    username: "user@example.com",
+                ),
+            ),
+            .fixture(deletedDate: .now, id: "4", type: .login),
+        ])
+        credentialIdentityFactory.createCredentialIdentitiesMocker
+            .withResult { cipher in
+                if cipher.id == "1" {
+                    [
+                        .password(
+                            PasswordCredentialIdentity(
+                                id: "1",
+                                uri: "bitwarden.com",
+                                username: "user@bitwarden.com",
+                            ),
+                        ),
+                    ]
+                } else if cipher.id == "3" {
+                    [
+                        .password(
+                            PasswordCredentialIdentity(
+                                id: "3",
+                                uri: "example.com",
+                                username: "user@example.com",
+                            ),
+                        ),
+                    ]
+                } else {
+                    []
+                }
+            }
+
+        vaultTimeoutService.vaultLockStatusSubject.send(VaultLockStatus(isVaultLocked: false, userId: "1"))
+        waitFor(identityStore.replaceCredentialIdentitiesIdentities != nil)
+
+        XCTAssertTrue(stateService.doesActiveAccountHavePremiumCalled)
+        XCTAssertEqual(
+            identityStore.replaceCredentialIdentitiesIdentities,
+            [
+                .password(PasswordCredentialIdentity(id: "1", uri: "bitwarden.com", username: "user@bitwarden.com")),
+                .password(PasswordCredentialIdentity(id: "3", uri: "example.com", username: "user@example.com")),
+            ],
+        )
+    }
+
+    /// `syncIdentities(vaultLockStatus:)` updates the credential identity store with the identities
+    /// from the user's vault when there are passwords and Fido2 credentials
+    func test_syncIdentities_passwordsAndFido2Credentials() { // swiftlint:disable:this function_body_length
+        cipherService.fetchAllCiphersResult = .success([
+            .fixture(
+                id: "1",
+                login: .fixture(
+                    password: "password123",
+                    uris: [.fixture(uri: "bitwarden.com")],
+                    username: "user@bitwarden.com",
+                ),
+            ),
+            .fixture(id: "2", type: .identity),
+            .fixture(
+                id: "3",
+                login: .fixture(
+                    fido2Credentials: [
+                        .fixture(),
+                    ],
+                    uris: [.fixture(uri: "example.com")],
+                    username: "user@example.com",
+                ),
+            ),
+            .fixture(deletedDate: .now, id: "4", type: .login),
+        ])
+        credentialIdentityFactory.createCredentialIdentitiesMocker
+            .withResult { cipher in
+                guard cipher.id == "1" else {
+                    return []
+                }
+                return [
+                    .password(
+                        PasswordCredentialIdentity(
+                            id: "1",
+                            uri: "bitwarden.com",
+                            username: "user@bitwarden.com",
+                        ),
+                    ),
+                ]
+            }
+        fido2AuthenticatorMock.credentialsForAutofillReturnValue = [
+            Fido2CredentialAutofillView(
+                credentialId: Data(repeating: 2, count: 32),
+                cipherId: "3",
+                rpId: "myApp.com",
+                userNameForUi: "MyUser",
+                userHandle: Data(repeating: 3, count: 45),
+                hasCounter: false,
+            ),
+        ]
+
+        vaultTimeoutService.vaultLockStatusSubject.send(VaultLockStatus(isVaultLocked: false, userId: "1"))
+        waitFor(identityStore.replaceCredentialIdentitiesIdentities != nil)
+
+        XCTAssertEqual(
+            identityStore.replaceCredentialIdentitiesIdentities,
+            [
+                .password(
+                    PasswordCredentialIdentity(
+                        id: "1",
+                        uri: "bitwarden.com",
+                        username: "user@bitwarden.com",
+                    ),
+                ),
+                .passkey(
+                    PasskeyCredentialIdentity(
+                        credentialID: Data(repeating: 2, count: 32),
+                        recordIdentifier: "3",
+                        relyingPartyIdentifier: "myApp.com",
+                        userHandle: Data(repeating: 3, count: 45),
+                        userName: "MyUser",
+                    ),
+                ),
+            ],
+        )
+    }
+
+    /// `syncIdentities(vaultLockStatus:)` updates the credential identity store with the identities
+    /// from the user's vault when there are passwords, Fido2 credentials and one time codes.
+    func test_syncIdentities_passwordsFido2CredentialsAndOTP() throws { // swiftlint:disable:this function_body_length
+        guard #available(iOS 18, *) else {
+            throw XCTSkip("One time code credentials are only available on iOS 18+")
+        }
+
+        cipherService.fetchAllCiphersResult = .success([
+            .fixture(
+                id: "1",
+                login: .fixture(
+                    password: "password123",
+                    uris: [.fixture(uri: "bitwarden.com")],
+                    username: "user@bitwarden.com",
+                    totp: "something",
+                ),
+                name: "MyCipher",
+            ),
+            .fixture(id: "2", type: .identity),
+            .fixture(
+                id: "3",
+                login: .fixture(
+                    fido2Credentials: [
+                        .fixture(),
+                    ],
+                    uris: [.fixture(uri: "example.com")],
+                    username: "user@example.com",
+                ),
+            ),
+            .fixture(deletedDate: .now, id: "4", type: .login),
+        ])
+        credentialIdentityFactory.createCredentialIdentitiesMocker
+            .withResult { cipher in
+                guard cipher.id == "1" else {
+                    return []
+                }
+                return [
+                    .password(
+                        PasswordCredentialIdentity(
+                            id: "1",
+                            uri: "bitwarden.com",
+                            username: "user@bitwarden.com",
+                        ),
+                    ),
+                    .oneTimeCode(
+                        OneTimeCodeCredentialIdentity(
+                            label: "MyCipher",
+                            recordIdentifier: "1",
+                            serviceIdentifier: "bitwarden.com",
+                        ),
+                    ),
+                ]
+            }
+        fido2AuthenticatorMock.credentialsForAutofillReturnValue = [
+            Fido2CredentialAutofillView(
+                credentialId: Data(repeating: 2, count: 32),
+                cipherId: "3",
+                rpId: "myApp.com",
+                userNameForUi: "MyUser",
+                userHandle: Data(repeating: 3, count: 45),
+                hasCounter: false,
+            ),
+        ]
+
+        vaultTimeoutService.vaultLockStatusSubject.send(VaultLockStatus(isVaultLocked: false, userId: "1"))
+        waitFor(identityStore.replaceCredentialIdentitiesIdentities != nil)
+
+        XCTAssertEqual(
+            identityStore.replaceCredentialIdentitiesIdentities,
+            [
+                .password(
+                    PasswordCredentialIdentity(
+                        id: "1",
+                        uri: "bitwarden.com",
+                        username: "user@bitwarden.com",
+                    ),
+                ),
+                .oneTimeCode(
+                    OneTimeCodeCredentialIdentity(
+                        label: "MyCipher",
+                        recordIdentifier: "1",
+                        serviceIdentifier: "bitwarden.com",
+                    ),
+                ),
+                .passkey(
+                    PasskeyCredentialIdentity(
+                        credentialID: Data(repeating: 2, count: 32),
+                        recordIdentifier: "3",
+                        relyingPartyIdentifier: "myApp.com",
+                        userHandle: Data(repeating: 3, count: 45),
+                        userName: "MyUser",
+                    ),
+                ),
+            ],
+        )
+    }
+
+    /// `syncIdentities(vaultLockStatus:)` updates the credential identity store with the device auth key
+    /// when the device auth key changes.
+    func test_syncIdentities_deviceAuthKeys() throws {
+        guard #available(iOS 17, *) else {
+            throw XCTSkip("Device auth keys are only available on iOS 17+")
+        }
+
+        configService.featureFlagsBool[.deviceAuthKey] = true
+
+        vaultTimeoutService.vaultLockStatusSubject.send(VaultLockStatus(isVaultLocked: false, userId: "1"))
+        waitFor(identityStore.replaceCredentialIdentitiesCalled == true)
+        identityStore.replaceCredentialIdentitiesCalled = false
+
+        deviceAuthKeyService.getDeviceAuthKeyMetadataReturnValue = DeviceAuthKeyKeychainMetadata.fixture()
+
+        deviceAuthKeySubject.send(["1": true])
+        waitFor(identityStore.replaceCredentialIdentitiesIdentities?.isEmpty == false)
+
+        XCTAssertEqual(
+            identityStore.replaceCredentialIdentitiesIdentities,
+            [
+                .passkey(
+                    PasskeyCredentialIdentity(
+                        credentialID: Data("credential-456".utf8),
+                        recordIdentifier: "cipher-123",
+                        relyingPartyIdentifier: "bitwarden.com",
+                        userHandle: Data("user-id".utf8),
+                        userName: "user@example.com",
+                    ),
+                ),
+            ],
+        )
+    }
+
+    /// `syncIdentities(vaultLockStatus:)` does not update the credential identity store with the device auth key
+    /// when the device auth key changes when the feature flag is off.
+    func test_syncIdentities_deviceAuthKeys_unflagged() throws {
+        guard #available(iOS 17, *) else {
+            throw XCTSkip("Device auth keys are only available on iOS 17+")
+        }
+
+        configService.featureFlagsBool[.deviceAuthKey] = false
+
+        vaultTimeoutService.vaultLockStatusSubject.send(VaultLockStatus(isVaultLocked: false, userId: "1"))
+        waitFor(identityStore.replaceCredentialIdentitiesCalled == true)
+        identityStore.replaceCredentialIdentitiesCalled = false
+
+        deviceAuthKeyService.getDeviceAuthKeyMetadataReturnValue = DeviceAuthKeyKeychainMetadata.fixture()
+
+        deviceAuthKeySubject.send(["1": true])
+        waitFor(identityStore.replaceCredentialIdentitiesCalled == true)
+
+        XCTAssertEqual(
+            identityStore.replaceCredentialIdentitiesIdentities,
+            [],
+        )
+    }
+
+    /// `syncIdentities(vaultLockStatus:)` doesn't remove identities if the store's state is disabled.
+    func test_syncIdentities_removeDisabled() async throws {
+        identityStore.state.mockIsEnabled = false
+
+        vaultTimeoutService.vaultLockStatusSubject.send(nil)
+        try await waitForAsync {
+            self.identityStore.stateCalled
+        }
+
+        XCTAssertFalse(identityStore.removeAllCredentialIdentitiesCalled)
+    }
+
+    /// `syncIdentities(vaultLockStatus:)` logs an error if removing identities fails.
+    func test_syncIdentities_removeError() {
+        identityStore.removeAllCredentialIdentitiesResult = .failure(BitwardenTestError.example)
+
+        vaultTimeoutService.vaultLockStatusSubject.send(nil)
+        waitFor(identityStore.removeAllCredentialIdentitiesCalled)
+
+        waitFor(!errorReporter.errors.isEmpty)
+        XCTAssertEqual(errorReporter.errors as? [BitwardenTestError], [.example])
+    }
+
+    /// `syncIdentities(vaultLockStatus:)` removes identities from the store when the user switches from a previous
+    /// synced vault to another user.
+    func test_syncIdentities_removeOnSwitched() async throws {
+        cipherService.fetchAllCiphersResult = .success([
+            .fixture(
+                id: "1",
+                login: .fixture(
+                    password: "password123",
+                    uris: [.fixture(uri: "bitwarden.com")],
+                    username: "user@bitwarden.com",
+                ),
+            ),
+        ])
+        credentialIdentityFactory.createCredentialIdentitiesMocker
+            .withResult([
+                .password(
+                    PasswordCredentialIdentity(
+                        id: "1",
+                        uri: "bitwarden.com",
+                        username: "user@bitwarden.com",
+                    ),
+                ),
+            ])
+
+        vaultTimeoutService.vaultLockStatusSubject.send(VaultLockStatus(isVaultLocked: false, userId: "1"))
+        try await waitForAsync {
+            self.identityStore.replaceCredentialIdentitiesIdentities != nil
+        }
+        XCTAssertEqual(identityStore.replaceCredentialIdentitiesIdentities?.count, 1)
+
+        vaultTimeoutService.vaultLockStatusSubject.send(VaultLockStatus(isVaultLocked: true, userId: "2"))
+        try await waitForAsync {
+            self.identityStore.removeAllCredentialIdentitiesCalled
+        }
+
+        XCTAssertTrue(identityStore.removeAllCredentialIdentitiesCalled)
+    }
+
+    /// `syncIdentities(vaultLockStatus:)` doesn't remove identities from the store when the user locks their vault.
+    func test_syncIdentities_dontRemoveOnSwitchedEqualUser() async throws {
+        cipherService.fetchAllCiphersResult = .success([
+            .fixture(
+                id: "1",
+                login: .fixture(
+                    password: "password123",
+                    uris: [.fixture(uri: "bitwarden.com")],
+                    username: "user@bitwarden.com",
+                ),
+            ),
+        ])
+        credentialIdentityFactory.createCredentialIdentitiesMocker
+            .withResult([
+                .password(
+                    PasswordCredentialIdentity(
+                        id: "1",
+                        uri: "bitwarden.com",
+                        username: "user@bitwarden.com",
+                    ),
+                ),
+            ])
+
+        vaultTimeoutService.vaultLockStatusSubject.send(VaultLockStatus(isVaultLocked: false, userId: "1"))
+        try await waitForAsync {
+            self.identityStore.replaceCredentialIdentitiesIdentities != nil
+        }
+        XCTAssertEqual(identityStore.replaceCredentialIdentitiesIdentities?.count, 1)
+
+        vaultTimeoutService.vaultLockStatusSubject.send(VaultLockStatus(isVaultLocked: true, userId: "1"))
+        XCTAssertFalse(identityStore.removeAllCredentialIdentitiesCalled)
+    }
+
+    /// `syncIdentities(vaultLockStatus:)` doesn't remove identities from the store when it tries to sync
+    /// for the first time and it's locked (last user ID synced is `nil`).
+    func test_syncIdentities_dontRemoveOnFirstSyncLocked() async throws {
+        vaultTimeoutService.vaultLockStatusSubject.send(VaultLockStatus(isVaultLocked: true, userId: "1"))
+        XCTAssertFalse(identityStore.removeAllCredentialIdentitiesCalled)
+    }
+
+    /// `syncIdentities(vaultLockStatus:)` removes identities from the store when the user logs out.
+    func test_syncIdentities_removeOnLogout() {
+        cipherService.fetchAllCiphersResult = .success([
+            .fixture(
+                id: "1",
+                login: .fixture(
+                    password: "password123",
+                    uris: [.fixture(uri: "bitwarden.com")],
+                    username: "user@bitwarden.com",
+                ),
+            ),
+        ])
+        credentialIdentityFactory.createCredentialIdentitiesMocker
+            .withResult([
+                .password(
+                    PasswordCredentialIdentity(
+                        id: "1",
+                        uri: "bitwarden.com",
+                        username: "user@bitwarden.com",
+                    ),
+                ),
+            ])
+
+        vaultTimeoutService.vaultLockStatusSubject.send(VaultLockStatus(isVaultLocked: false, userId: "1"))
+        waitFor(identityStore.replaceCredentialIdentitiesIdentities != nil)
+        XCTAssertEqual(identityStore.replaceCredentialIdentitiesIdentities?.count, 1)
+
+        vaultTimeoutService.vaultLockStatusSubject.send(nil)
+        waitFor(identityStore.removeAllCredentialIdentitiesCalled)
+        XCTAssertTrue(identityStore.removeAllCredentialIdentitiesCalled)
+    }
+
+    /// `syncIdentities(vaultLockStatus:)` doesn't replace identities if the store's state is disabled.
+    func test_syncIdentities_replaceDisabled() {
+        identityStore.state.mockIsEnabled = false
+
+        vaultTimeoutService.vaultLockStatusSubject.send(VaultLockStatus(isVaultLocked: false, userId: "1"))
+        waitFor(identityStore.stateCalled)
+
+        XCTAssertFalse(identityStore.replaceCredentialIdentitiesCalled)
+    }
+
+    /// `syncIdentities(vaultLockStatus:)` logs an error if replacing identities fails.
+    func test_syncIdentities_replaceError() {
+        identityStore.replaceCredentialIdentitiesResult = .failure(BitwardenTestError.example)
+
+        vaultTimeoutService.vaultLockStatusSubject.send(VaultLockStatus(isVaultLocked: false, userId: "1"))
+        waitFor(!errorReporter.errors.isEmpty)
+
+        XCTAssertTrue(identityStore.replaceCredentialIdentitiesCalled)
+        XCTAssertEqual(errorReporter.errors as? [BitwardenTestError], [.example])
+    }
+
+    /// `syncIdentities(vaultLockStatus:)` does not replace identities when the app is in the
+    /// background, even if the vault is unlocked.
+    func test_syncIdentities_skipsReplaceWhenInBackground() async throws {
+        notificationCenterService.isInForegroundSubject.send(false)
+        vaultTimeoutService.vaultLockStatusSubject.send(VaultLockStatus(isVaultLocked: false, userId: "1"))
+
+        // Allow the sync task time to process the cipher emission and enter the foreground-wait state.
+        try await Task.sleep(nanoseconds: 100_000_000)
+
+        XCTAssertFalse(identityStore.replaceCredentialIdentitiesCalled)
+    }
+
+    /// `syncIdentities(vaultLockStatus:)` defers a replace until the app returns to the foreground
+    /// when a cipher change arrives while backgrounded.
+    func test_syncIdentities_replacesOnForeground() {
+        cipherService.fetchAllCiphersResult = .success([
+            .fixture(
+                id: "1",
+                login: .fixture(
+                    password: "password123",
+                    uris: [.fixture(uri: "bitwarden.com")],
+                    username: "user@bitwarden.com",
+                ),
+            ),
+        ])
+        credentialIdentityFactory.createCredentialIdentitiesMocker
+            .withResult([
+                .password(
+                    PasswordCredentialIdentity(
+                        id: "1",
+                        uri: "bitwarden.com",
+                        username: "user@bitwarden.com",
+                    ),
+                ),
+            ])
+
+        // Background the app, then unlock the vault. The sync task will subscribe to ciphersPublisher
+        // but defer the replace until the app foregrounds.
+        notificationCenterService.isInForegroundSubject.send(false)
+        vaultTimeoutService.vaultLockStatusSubject.send(VaultLockStatus(isVaultLocked: false, userId: "1"))
+
+        // Return to foreground — the deferred replace should now execute.
+        notificationCenterService.isInForegroundSubject.send(true)
+        waitFor(identityStore.replaceCredentialIdentitiesIdentities != nil)
+
+        XCTAssertEqual(identityStore.replaceCredentialIdentitiesIdentities?.count, 1)
+    }
+} // swiftlint:disable:this file_length

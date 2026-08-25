@@ -1,0 +1,10 @@
+"ThereAreNoItemsToList" = "항목이 없습니다.";
+"ToViewVerificationCodesUpgradeToPremium" = "인증 코드를 보려면 프리미엄으로 업그레이드하십시오.";
+"Add2FactorAutenticationToAnItemToViewVerificationCodes" = "인증 코드를 보려면 항목에 2단계 인증을 추가하십시오.";
+"LogInToBitwardenOnYourIPhoneToViewVerificationCodes" = "인증 코드를 보려면 iPhone에서 Bitwarden에 로그인하십시오.";
+"SyncingItemsContainingVerificationCodes" = "인증 코드를 포함한 항목을 동기화하는 중";
+"UnlockBitwardenOnYourIPhoneToViewVerificationCodes" = "인증 코드를 보려면 iPhone에서 Bitwarden을 잠금 해제하십시오.";
+"SetUpBitwardenToViewItemsContainingVerificationCodes" = "인증 코드를 포함한 항목을 보려면 Bitwarden을 사용 설정하십시오.";
+"Search" = "검색";
+"NoItemsFound" = "항목을 찾을 수 없습니다";
+"SetUpAppleWatchPasscodeInOrderToUseBitwarden" = "Bitwarden을 사용하려면 Apple Watch의 잠금을 설정하십시오.";

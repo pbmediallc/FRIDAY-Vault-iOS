@@ -1,0 +1,21 @@
+import Networking
+
+@MainActor
+class TestResponseHandler: ResponseHandler {
+    var handledResponse: HTTPResponse?
+    var responseHandler: ((inout HTTPResponse) -> Void)?
+
+    init(_ responseHandler: ((inout HTTPResponse) -> Void)?) {
+        self.responseHandler = responseHandler
+    }
+
+    func handle(
+        _ response: inout HTTPResponse,
+        for request: HTTPRequest,
+        retryWith: ((HTTPRequest) async throws -> HTTPResponse)?,
+    ) async throws -> HTTPResponse {
+        handledResponse = response
+        responseHandler?(&response)
+        return response
+    }
+}

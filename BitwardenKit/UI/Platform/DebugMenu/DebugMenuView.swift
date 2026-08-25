@@ -1,0 +1,196 @@
+import BitwardenResources
+import SwiftUI
+
+// MARK: - DebugMenuView
+
+/// Represents the debug menu for configuring app settings and feature flags.
+///
+public struct DebugMenuView: View {
+    // MARK: Properties
+
+    /// The store used to render the view.
+    @ObservedObject var store: Store<DebugMenuState, DebugMenuAction, DebugMenuEffect>
+
+    // MARK: View
+
+    public var body: some View {
+        List {
+            Section {
+                featureFlags
+            } header: {
+                featureFlagSectionHeader
+            }
+            Section {
+                ssoCookiesSection
+            } header: {
+                Text("SSO cookies")
+            }
+
+            Section {
+                accountDecryptionSection
+            } header: {
+                Text("Account decryption")
+            }
+
+            Section {
+                fillAssistSection
+            } header: {
+                Text("Fill Assist")
+            }
+
+            userIDSection
+
+            Section {
+                errorReportSection
+            } header: {
+                Text("Error reports")
+            }
+        }
+        .toolbar {
+            ToolbarItem(placement: .navigationBarTrailing) {
+                closeToolbarButton {
+                    store.send(.dismissTapped)
+                }
+            }
+        }
+        .navigationTitle("Debug Menu")
+        .task {
+            await store.perform(.viewAppeared)
+        }
+        .toast(store.binding(
+            get: \.toast,
+            send: DebugMenuAction.toastShown,
+        ))
+    }
+
+    /// The error reports section.
+    private var errorReportSection: some View {
+        Group {
+            Button {
+                store.send(.generateErrorReport)
+            } label: {
+                Text(Localizations.generateErrorReport)
+            }
+            .accessibilityIdentifier("GenerateErrorReportButton")
+            Button {
+                store.send(.generateSdkErrorReport)
+            } label: {
+                Text(Localizations.generateSdkErrorReport)
+            }
+            .accessibilityIdentifier("GenerateSdkErrorReportButton")
+            Button {
+                store.send(.generateCrash)
+            } label: {
+                Text(Localizations.generateCrash)
+            }
+            .accessibilityIdentifier("GenerateCrashButton")
+        }
+    }
+
+    /// The feature flags currently used in the app.
+    private var featureFlags: some View {
+        ForEach(store.state.featureFlags) { flag in
+            Toggle(
+                isOn: store.bindingAsync(
+                    get: { _ in flag.isEnabled },
+                    perform: { DebugMenuEffect.toggleFeatureFlag(flag.feature.rawValue, $0) },
+                ),
+            ) {
+                Text(flag.feature.name)
+            }
+            .toggleStyle(.bitwarden)
+            .accessibilityIdentifier(flag.feature.rawValue)
+        }
+    }
+
+    /// The header for the feature flags section.
+    private var featureFlagSectionHeader: some View {
+        HStack {
+            Text("Feature Flags")
+            Spacer()
+            AsyncButton {
+                await store.perform(.refreshFeatureFlags)
+            } label: {
+                Image(systemName: "arrow.clockwise")
+            }
+            .accessibilityLabel("RefreshFeatureFlagsButton")
+        }
+    }
+
+    /// Actions that allow to manipulate cached account-decryption state to support testing
+    /// of edge cases (e.g. PM-31723: profile cached before the server added `masterPasswordUnlock`).
+    private var accountDecryptionSection: some View {
+        AsyncButton {
+            await store.perform(.clearMasterPasswordUnlock)
+        } label: {
+            Text(Localizations.clearMasterPasswordUnlock)
+        }
+        .accessibilityIdentifier("ClearMasterPasswordUnlockButton")
+    }
+
+    /// The section for adding a Fill Assist debug rule and clearing the cached rules, to support
+    /// testing Fill Assist against custom pages without waiting for a real forms-map sync.
+    private var fillAssistSection: some View {
+        Group {
+            Button {
+                store.send(.addFillAssistRuleTapped)
+            } label: {
+                Text("Add fill assist rule")
+            }
+            .accessibilityIdentifier("AddFillAssistRuleButton")
+
+            AsyncButton {
+                await store.perform(.clearFillAssistCache)
+            } label: {
+                Text("Clear fill assist cache")
+            }
+            .accessibilityIdentifier("ClearFillAssistCacheButton")
+        }
+    }
+
+    /// The SSO cookies section.
+    private var ssoCookiesSection: some View {
+        AsyncButton {
+            await store.perform(.clearSsoCookies)
+        } label: {
+            Text(Localizations.clearSsoCookies)
+        }
+        .accessibilityIdentifier("ClearSsoCookiesButton")
+    }
+
+    /// The section displaying the user ID
+    private var userIDSection: some View {
+        Section {
+            Button {
+                store.send(.copyUserID)
+            } label: {
+                Text(Localizations.copyUserID)
+            }
+            .accessibilityIdentifier("CopyUserIdToClipboardButton")
+        } header: {
+            Text("\(Localizations.userID): \(store.state.userID ?? Localizations.userIDUnavailable)")
+                .truncationMode(.middle)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .lineLimit(1)
+        }
+    }
+}
+
+#if DEBUG
+#Preview {
+    DebugMenuView(
+        store: Store(
+            processor: StateProcessor(
+                state: .init(
+                    featureFlags: [
+                        .init(
+                            feature: FeatureFlag(rawValue: "feature-flag"),
+                            isEnabled: true,
+                        ),
+                    ],
+                ),
+            ),
+        ),
+    )
+}
+#endif

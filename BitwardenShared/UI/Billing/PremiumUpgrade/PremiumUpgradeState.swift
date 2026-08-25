@@ -1,0 +1,59 @@
+import BitwardenResources
+import Foundation
+
+// MARK: - PremiumUpgradeState
+
+/// An object that defines the current state of the `PremiumUpgradeView`.
+///
+struct PremiumUpgradeState: Equatable {
+    // MARK: Properties
+
+    /// Whether the self-hosted info banner has been dismissed.
+    var isBannerDismissed = false
+
+    /// Whether the view is loading the checkout session.
+    var isLoading = false
+
+    /// Whether the user is on a self-hosted server.
+    var isSelfHosted = false
+
+    /// The raw Premium seat price. `nil` until successfully fetched from the API.
+    var premiumSeatPrice: Decimal?
+
+    /// Whether the cancel (X) toolbar button should be shown.
+    var showCancelButton = true
+
+    /// Whether the pricing error banner is visible.
+    var showPricingErrorBanner = false
+
+    // MARK: Computed Properties
+
+    /// The formatted monthly Premium price string, or `nil` if the price hasn't been fetched yet.
+    var premiumPrice: String? {
+        premiumSeatPrice.flatMap { NumberFormatter.usdCurrency.string(from: NSDecimalNumber(decimal: $0 / 12)) }
+    }
+
+    /// The VoiceOver-friendly version of `priceCancelAnytimeText`, or `nil` if the price hasn't
+    /// been fetched yet. Uses "per month" instead of "/ month" and a comma instead of "·".
+    var priceCancelAnytimeAccessibilityLabel: String? {
+        premiumPrice.map { price in
+            Localizations.xCancelAnytimeVoiceOver(
+                Localizations.xAmountPerCadence(price, Localizations.perMonthVoiceOver),
+            )
+        }
+    }
+
+    /// The formatted monthly price (bolded) with the "Cancel anytime" suffix, or `nil` if the
+    /// price hasn't been fetched yet. Render with `Text(LocalizedStringKey:)` so the markdown
+    /// bold around the price is applied.
+    var priceCancelAnytimeText: String? {
+        premiumPrice.map { price in
+            Localizations.xCancelAnytime(Localizations.xAmountPerCadence("**\(price)**", Localizations.perMonth))
+        }
+    }
+
+    /// Whether the self-hosted info banner should be shown.
+    var showSelfHostedBanner: Bool {
+        isSelfHosted && !isBannerDismissed
+    }
+}

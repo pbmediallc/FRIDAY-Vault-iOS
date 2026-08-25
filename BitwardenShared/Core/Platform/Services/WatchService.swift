@@ -1,0 +1,381 @@
+import BitwardenKit
+import BitwardenSdk
+import Combine
+import WatchConnectivity
+
+// MARK: - WatchService
+
+/// The service used to connect to and communicate with the watch app.
+///
+protocol WatchService {
+    /// Whether the device has support for a watch session.
+    func isSupported() -> Bool
+}
+
+// MARK: - DefaultWatchService
+
+/// The default `WatchService` type for the application.
+///
+class DefaultWatchService: NSObject, WatchService {
+    // MARK: Private Properties
+
+    /// The service used to manage syncing and updates to the user's ciphers.
+    private let cipherService: CipherService
+
+    /// The service that handles common client functionality such as encryption and decryption.
+    private let clientService: ClientService
+
+    /// The service used by the application to manage the environment settings.
+    private let environmentService: EnvironmentService
+
+    /// The service used by the application to report non-fatal errors.
+    private let errorReporter: ErrorReporter
+
+    /// The service used to manage syncing and updates to the user's organizations.
+    private let organizationService: OrganizationService
+
+    /// The watch connect session.
+    private var session: (any WatchSession)?
+
+    /// The service used by the application to manage account state.
+    private let stateService: StateService
+
+    /// Keep a reference to the task used to sync the watch when the ciphers change, so that
+    /// it can be cancelled and recreated when the user changes.
+    private var syncCiphersTask: Task<Void, Never>?
+
+    /// The service used by the application to manage vault access.
+    private let vaultTimeoutService: VaultTimeoutService
+
+    /// The factory used to create and check support for watch sessions.
+    private let watchSessionFactory: WatchSessionFactory
+
+    // MARK: Initialization
+
+    /// Initialize a `DefaultWatchService`.
+    ///
+    /// - Parameters:
+    ///   - cipherService: The service used to manage syncing and updates to the user's ciphers.
+    ///   - clientService: The service that handles common client functionality such as encryption and decryption.
+    ///   - environmentService: The service used by the application to manage the environment settings.
+    ///   - errorReporter: The service used by the application to report non-fatal errors.
+    ///   - organizationService: The service used to manage syncing and updates to the user's organizations.
+    ///   - stateService: The service used by the application to manage account state.
+    ///   - vaultTimeoutService: The service used by the application to manage vault access.
+    ///   - watchSessionFactory: The factory used to create and check support for watch sessions.
+    ///
+    init(
+        cipherService: CipherService,
+        clientService: ClientService,
+        environmentService: EnvironmentService,
+        errorReporter: ErrorReporter,
+        organizationService: OrganizationService,
+        stateService: StateService,
+        watchSessionFactory: WatchSessionFactory = DefaultWatchSessionFactory(),
+        vaultTimeoutService: VaultTimeoutService,
+    ) {
+        self.cipherService = cipherService
+        self.clientService = clientService
+        self.environmentService = environmentService
+        self.errorReporter = errorReporter
+        self.organizationService = organizationService
+        self.stateService = stateService
+        self.vaultTimeoutService = vaultTimeoutService
+        self.watchSessionFactory = watchSessionFactory
+        super.init()
+
+        // Listen for changes in the settings, vault lock state, and data that would require
+        // syncing with the watch.
+        Task {
+            let connectPublisher = await self.stateService.connectToWatchPublisher()
+            let vaultStatusPublisher = await self.vaultTimeoutService.vaultLockStatusPublisher()
+
+            // Use the publishers as triggers only — reading their combined values directly would
+            // produce intermediate mismatched states, since both independently subscribe to
+            // `activeAccountIdPublisher()` and emit sequentially on account changes.
+            // `syncWithWatch()` reads all relevant state in a single pass to ensure consistency.
+            for await _ in connectPublisher.combineLatest(vaultStatusPublisher).values {
+                syncWithWatch()
+            }
+        }
+    }
+
+    // MARK: Methods
+
+    /// Handle messages received from the watch to listen for requests to sync.
+    ///
+    /// - Parameter message: The message received from the watch.
+    ///
+    func handleMessage(_ message: [String: Any]) async {
+        if let actionMessage = message["actionMessage"] as? String, actionMessage == "triggerSync" {
+            syncWithWatch()
+        }
+    }
+
+    func isSupported() -> Bool {
+        watchSessionFactory.isSupported()
+    }
+
+    // MARK: Private Methods
+
+    /// Take a list of encrypted ciphers, decrypt them, filter for only active ciphers with a totp code, then
+    /// convert the list to the simple cipher objects used to communicate with the watch.
+    ///
+    /// - Parameter ciphers: The encrypted `Cipher` objects.
+    ///
+    /// - Returns: The decrypted, filtered, and sorted `CipherDTO` objects.
+    ///
+    private func decryptCiphers(_ ciphers: [Cipher]) async throws -> [CipherDTO] {
+        let decryptedCiphers = try await ciphers.asyncMap { cipher in
+            try await self.clientService.vault().ciphers().decrypt(cipher: cipher)
+        }
+
+        return decryptedCiphers.filter { cipher in
+            !cipher.isHidden
+                && cipher.type == .login
+                && cipher.login?.totp != nil
+        }
+        .compactMap { CipherDTO(cipherView: $0) }
+    }
+
+    /// Load the active account, if one exists, and determine if it is accurately set up to connect to the watch.
+    ///
+    /// - Parameter shouldConnect: Whether the user has toggled on the connect to watch setting.
+    ///
+    /// - Returns: The user data or the invalid state to sync to the watch.
+    ///
+    private func getUserData(_ shouldConnect: Bool) async -> (user: UserDTO?, state: BWState) {
+        // Get the user's account information.
+        let account = try? await stateService.getActiveAccount()
+        guard let account else {
+            return (nil, .needLogin)
+        }
+        let userData = UserDTO(
+            email: account.profile.email,
+            id: account.profile.userId,
+            name: account.profile.name,
+        )
+
+        // If the user isn't set up to use the watch, sync the invalid state to the watch.
+        guard shouldConnect else { return (nil, .needSetup) }
+
+        // Ensure the user has access to Premium features or sync the invalid state to the watch.
+        if account.profile.hasPremiumPersonally != true {
+            let organizations = try? await organizationService
+                .fetchAllOrganizations()
+                .filter { $0.enabled && $0.usersGetPremium }
+            guard organizations?.isEmpty == false else { return (nil, .needPremium) }
+        }
+
+        // Return the user data with the valid state.
+        return (userData, .valid)
+    }
+
+    /// Start the session to connect to the watch.
+    private func startSession() {
+        if watchSessionFactory.isSupported(), session == nil {
+            session = watchSessionFactory.makeSession()
+            session?.delegate = self
+        }
+        if session?.activationState != .activated {
+            session?.activate()
+        }
+    }
+
+    /// Fetch the current account state and sync with the watch.
+    ///
+    private func syncWithWatch() {
+        // This method will be called whenever the connect value, vault lock state, or account
+        // value changes, so the task listening to the cipher updates will need to be cancelled
+        // and recreated each time.
+        syncCiphersTask?.cancel()
+        syncCiphersTask = Task {
+            let userId: String?
+            do {
+                userId = try await stateService.getActiveAccountId()
+            } catch StateServiceError.noActiveAccount {
+                userId = nil
+            } catch {
+                userId = nil
+                errorReporter.log(error: error)
+            }
+
+            let shouldConnect: Bool
+            do {
+                shouldConnect = try await stateService.getConnectToWatch()
+            } catch StateServiceError.noActiveAccount {
+                shouldConnect = await stateService.getLastUserShouldConnectToWatch()
+            } catch {
+                shouldConnect = await stateService.getLastUserShouldConnectToWatch()
+                errorReporter.log(error: error)
+            }
+
+            let isVaultLocked = if let userId {
+                await vaultTimeoutService.isLocked(userId: userId)
+            } else {
+                true
+            }
+
+            await syncWithWatch(
+                userId: userId,
+                shouldConnect: shouldConnect,
+                isVaultLocked: isVaultLocked,
+            )
+        }
+    }
+
+    /// Sync data with the watch.
+    ///
+    /// - Parameters:
+    ///   - ciphers: All the ciphers for the current user, or an empty list otherwise.
+    ///   - shouldConnect: Whether the user has toggled on the connect to watch setting.
+    ///
+    private func syncWithWatch(ciphers: [Cipher], shouldConnect: Bool) async throws {
+        guard watchSessionFactory.isSupported() else { return }
+
+        // Connect the session if necessary.
+        if shouldConnect, session?.activationState != .activated {
+            startSession()
+        }
+        guard let session, session.isPaired, session.isWatchAppInstalled else { return }
+
+        // Get the user information.
+        let userResult = await getUserData(shouldConnect)
+        guard let userData = userResult.user else {
+            return try session.sendInvalidState(userResult.state)
+        }
+
+        // Decrypt and filter the ciphers.
+        let activeCiphers = try await decryptCiphers(ciphers)
+
+        // If there are no active totp ciphers, send the status to the watch.
+        if activeCiphers.isEmpty {
+            return try session.sendInvalidState(.need2FAItem)
+        }
+
+        // Send the resulting data to the watch.
+        let watchData = WatchDTO(
+            state: .valid,
+            ciphers: activeCiphers,
+            userData: userData,
+            environmentData: .init(
+                base: environmentService.apiURL.absoluteString,
+                icons: environmentService.iconsURL.absoluteString,
+            ),
+        )
+        try session.sendDataToWatch(watchData)
+    }
+
+    /// Fetch the ciphers for the user, if logged in, and sync with the watch.
+    ///
+    /// - Parameters:
+    ///   - userId: The user's id, if one exists.
+    ///   - shouldConnect: Whether the user has toggled on the connect to watch setting.
+    ///   - isVaultLocked: Whether the active vault is currently locked.
+    ///
+    private func syncWithWatch(userId: String?, shouldConnect: Bool, isVaultLocked: Bool) async {
+        do {
+            // If the user isn't logged in, sync the watch with an empty list of ciphers.
+            guard userId != nil else {
+                try await syncWithWatch(ciphers: [], shouldConnect: shouldConnect)
+                return
+            }
+
+            // If the vault is locked, skip cipher sync to avoid decryption errors.
+            guard !isVaultLocked else {
+                return
+            }
+
+            // Otherwise, listen to the publisher to sync any cipher updates with the watch.
+            for try await ciphers in try await cipherService.ciphersPublisher().values {
+                try await syncWithWatch(ciphers: ciphers, shouldConnect: shouldConnect)
+            }
+        } catch {
+            errorReporter.log(error: error)
+        }
+    }
+}
+
+// MARK: - WCSessionDelegate
+
+extension DefaultWatchService: WCSessionDelegate {
+    /// Triggers a sync when the session activates successfully.
+    func session(
+        _ session: WCSession,
+        activationDidCompleteWith activationState: WCSessionActivationState,
+        error: Error?,
+    ) {
+        guard activationState == .activated, error == nil else { return }
+        syncWithWatch()
+    }
+
+    /// Required delegate method that requires no action on the app.
+    func sessionDidBecomeInactive(_: WCSession) {}
+
+    /// Required delegate method that requires no action on the app.
+    func sessionDidDeactivate(_: WCSession) {}
+
+    /// Handle messages received from the watch.
+    func session(_: WCSession, didReceiveMessage message: [String: Any]) {
+        Task {
+            await handleMessage(message)
+        }
+    }
+
+    /// Handle messages received from the watch.
+    func session(
+        _: WCSession,
+        didReceiveMessage message: [String: Any],
+        replyHandler _: @escaping ([String: Any]) -> Void,
+    ) {
+        Task {
+            await handleMessage(message)
+        }
+    }
+}
+
+// MARK: WatchSession Extension
+
+extension WatchSession {
+    /// A convenience method to send an invalid state to the watch.
+    ///
+    /// - Parameter state: The invalid state to send.
+    ///
+    func sendInvalidState(_ state: BWState) throws {
+        try sendDataToWatch(WatchDTO(state: state))
+    }
+
+    /// Encode the data and send it to the watch.
+    ///
+    /// - Parameter watchData: The data to send to the watch.
+    ///
+    func sendDataToWatch(_ watchData: WatchDTO) throws {
+        let data = try MessagePackEncoder().encode(watchData)
+        let compressedData = try NSData(data: data).compressed(using: .lzfse)
+
+        // Add time to the key to make it change on every message sent so that it's delivered faster.
+        let dictionary = ["watchDto-\(Date())": compressedData]
+        try updateApplicationContext(dictionary)
+    }
+}
+
+// MARK: - CipherDTO
+
+extension CipherDTO {
+    /// Initialize a simplified cipher model from a regular cipher view.
+    ///
+    /// - Parameter cipherView: The cipher view to use.
+    ///
+    init?(cipherView: CipherView) {
+        guard let id = cipherView.id else { return nil }
+        self.init(
+            id: id,
+            login: .init(
+                totp: cipherView.login?.totp,
+                uris: cipherView.login?.uris?.compactMap { .init(uri: $0.uri) },
+                username: cipherView.login?.username,
+            ),
+            name: cipherView.name,
+        )
+    }
+}

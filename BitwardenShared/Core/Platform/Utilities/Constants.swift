@@ -1,0 +1,178 @@
+import BitwardenKit
+import Foundation
+
+// MARK: - Constants
+
+/// Constant values reused throughout the app.
+///
+extension Constants {
+    // MARK: Static Properties
+
+    /// The app review prompt delay in nanoseconds.
+    static let appReviewPromptDelay: UInt64 = 3_000_000_000
+
+    /// The size of the slice to decrypt ciphers in batch using the SDK.
+    static let decryptCiphersBatchSize: Int = 100
+
+    /// The default type for a Fido2 public key credential.
+    static let defaultFido2PublicKeyCredentialType = "public-key"
+
+    /// The default generated username if there isn't enough information to generate a username.
+    static let defaultGeneratedUsername = "-"
+
+    /// The URL for the web vault if the user account doesn't have one specified.
+    static let defaultWebVaultHost = "bitwarden.com"
+
+    /// The length of a masked password.
+    static let hiddenPasswordLength = 8
+
+    /// A custom URL scheme to support action extension autofill from other apps.
+    static let iOSAppProtocol = "iosapp://"
+
+    /// A default value for the argon memory argument in the KDF algorithm.
+    static let kdfArgonMemory = 64
+
+    /// A default value for the argon parallelism argument in the KDF algorithm.
+    static let kdfArgonParallelism = 4
+
+    /// The value representing 10 MB of data.
+    static let largeFileSize = 10_485_760
+
+    /// The number of minutes until a login request expires.
+    static let loginRequestTimeoutMinutes = 15
+
+    /// The maximum number of accounts permitted for a user.
+    static let maxAccounts = 5
+
+    /// The maximum amount of KDF memory that can be used to unlock the user's vault in an app
+    /// extension before the app should warn the user that the extension may hit its memory limit.
+    static let maxArgon2IdMemoryBeforeExtensionCrashing = 64
+
+    /// The value representing 100 MB of data.
+    static let maxFileSize = 104_857_600
+
+    /// The maximum size of files for upload.
+    static let maxFileSizeBytes = 104_857_600
+
+    /// The maximum number of passwords stored in history.
+    static let maxPasswordsInHistory = 100
+
+    /// The maximum number of unsuccessful attempts the user can make to unlock
+    static let maxUnlockUnsuccessfulAttempts = 5
+
+    /// A default value for the minimum number of characters required when creating a password.
+    static let minimumPasswordCharacters = 12
+
+    /// The minimum number of PBKDF2 iterations before a forced KDF update is required.
+    static let minimumPbkdf2IterationsForUpgrade = 600_000
+
+    /// The minimum length when setting a pin.
+    static let minimumPinLength = 4
+
+    /// The minimum number of cipher items required to show the Premium upgrade banner.
+    static let minimumPremiumUpgradeBannerCipherCount = 5
+
+    /// The minimum number of minutes before allowing the vault to sync again.
+    static let minimumSyncInterval: TimeInterval = 30 * 60 // 30 minutes
+
+    /// The minimum number of user actions required to show the app review prompt.
+    static let minimumUserActions = 3
+
+    /// The minimum number of cipher items without folder
+    static let noFolderListSize = 100
+
+    /// The default number of KDF iterations to perform.
+    static let pbkdf2Iterations = 600_000
+
+    /// The Premium checkout status publisher debounce interval.
+    static let premiumCheckoutStatusDebounceInterval: DispatchQueue.SchedulerTimeType.Stride = .milliseconds(300)
+
+    /// The minimum account age required to show the Premium upgrade banner.
+    static let premiumUpgradeBannerAccountAge: TimeInterval = 7 * 24 * 60 * 60
+
+    /// The path component appended to a vault URL to reach the SSO cookie redirect page.
+    static let proxyCookieRedirectConnectorPath = "proxy-cookie-redirect-connector.html"
+
+    /// The time to wait until we can request again to turn on credential provider extension.
+    ///
+    /// This is based on ``ASSettingsHelper.requestToTurnOnCredentialProviderExtension(completionHandler:)`` waiting
+    /// time of 10secs but we set some more seconds just to be sure.
+    static let requestToTurnOnCredentialProviderExtensionWaitTime: TimeInterval = 15 // swiftlint:disable:this identifier_name line_length
+
+    /// The number of seconds before an access token's expiration time at which the app will
+    /// preemptively refresh the token.
+    static let tokenRefreshThreshold: TimeInterval = 5 * 60 // 5 minutes
+}
+
+// MARK: Extension Constants
+
+extension Constants {
+    /// Uniform type identifier constants used by the app.
+    ///
+    enum UTType {
+        /// A type identifier for the app extension change password action.
+        static let appExtensionChangePasswordAction = "org.appextension.change-password-action"
+
+        /// A type identifier for the app extension fill browser action.
+        static let appExtensionFillBrowserAction = "org.appextension.fill-browser-action"
+
+        /// A type identifier for the app extension fill webview action.
+        static let appExtensionFillWebViewAction = "org.appextension.fill-webview-action"
+
+        /// A type identifier for the app extension find login action.
+        static let appExtensionFindLoginAction = "org.appextension.find-login-action"
+
+        /// A type identifier for the app extension save login action.
+        static let appExtensionSaveLogin = "org.appextension.save-login-action"
+
+        /// A type identifier for the app extension setup.
+        static let appExtensionSetup = "com.8bit.bitwarden.extension-setup"
+    }
+
+    /// An app extension key for notes for a login.
+    static let appExtensionNotesKey = "notes"
+
+    /// An app extension key for the previous password when changing a password.
+    static let appExtensionOldPasswordKey = "old_password"
+
+    /// An app extension key for password generator options.
+    static let appExtensionPasswordGeneratorOptionsKey = "password_generator_options"
+
+    /// An app extension key for a password.
+    static let appExtensionPasswordKey = "password"
+
+    /// An app extension key for a login title.
+    static let appExtensionTitleKey = "login_title"
+
+    /// An app extension key for the autofill URL.
+    static let appExtensionUrlStringKey = "url_string"
+
+    /// An app extension key for a username.
+    static let appExtensionUsernameKey = "username"
+
+    /// An app extension key for the page details JSON.
+    static let appExtensionWebViewPageDetails = "pageDetails"
+
+    /// An app extension key for the fill script JSON.
+    static let appExtensionWebViewPageFillScript = "fillScript"
+}
+
+// MARK: - Fill-Assist Constants
+
+extension Constants {
+    /// Fill-Assist constants used by the app.
+    ///
+    enum FillAssist {
+        /// The expected major component of the forms schema version (e.g. `"1"` for `"1.0.0"`).
+        static let expectedSchemaMajor = "1"
+
+        /// The forms map major version key requested from the manifest (e.g. `"v1"`).
+        static let formsVersion = "v1"
+
+        /// The filename of the Fill-Assist manifest on the CDN.
+        static let manifestFilename = "manifest.json"
+
+        /// The minimum interval between fill-assist manifest checks (6 hours, matching the browser implementation).
+        static let updateInterval: TimeInterval = 6 * 60 * 60
+    }
+}

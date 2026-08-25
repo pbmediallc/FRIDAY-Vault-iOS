@@ -1,0 +1,512 @@
+import BitwardenKit
+import BitwardenResources
+import Foundation
+import OSLog
+import UserNotifications
+
+// MARK: - NotificationService
+
+/// A protocol for a service that handles app notifications.
+///
+protocol NotificationService {
+    /// Decodes and saves the push notification token after the device has successfully registered for push
+    /// notifications.
+    ///
+    /// - Parameter tokenData: The data of the push notification token.
+    ///
+    func didRegister(withToken tokenData: Data) async
+
+    /// Processes any messages received by the application.
+    ///
+    /// - Parameters:
+    ///   - message: The content of the push notification.
+    ///   - notificationDismissed: `true` if a notification banner has been dismissed.
+    ///   - notificationTapped: `true` if a notification banner has been tapped.
+    ///
+    func messageReceived(
+        _ message: [AnyHashable: Any],
+        notificationDismissed: Bool?,
+        notificationTapped: Bool?,
+    ) async
+
+    /// Gets the notification authorization for the device.
+    ///
+    /// - Returns: The current device UNAuthorizationStatus.
+    ///
+    func notificationAuthorization() async -> UNAuthorizationStatus
+
+    /// Requests notification authotrization.
+    ///
+    /// - Parameter options: The `UNAuthorizationOptions` to request.
+    /// - Returns: A bool indicating the status.
+    ///
+    func requestAuthorization(options: UNAuthorizationOptions) async throws -> Bool
+
+    /// Set the delegate for the `NotificationService`.
+    ///
+    /// - Parameter delegate: The delegate.
+    ///
+    func setDelegate(_ delegate: NotificationServiceDelegate?)
+}
+
+// MARK: - NotificationServiceDelegate
+
+/// The delegate to handle login request actions originating from notifications.
+///
+@MainActor
+protocol NotificationServiceDelegate: AnyObject {
+    /// Users are logged out, route to landing page.
+    ///
+    func routeToLanding() async
+
+    /// Show the login request.
+    ///
+    /// - Parameter loginRequest: The login request.
+    ///
+    func showLoginRequest(_ loginRequest: LoginRequest)
+
+    /// Switch the active account in order to show the login request, prompting the user if necessary.
+    ///
+    /// - Parameters:
+    ///   - account: The account associated with the login request.
+    ///   - showAlert: Whether to show the alert or simply switch the account.
+    ///
+    func switchAccountsForLoginRequest(to account: Account, showAlert: Bool) async
+}
+
+// MARK: - DefaultNotificationService
+
+/// The default implementation of `NotificationService`.
+///
+class DefaultNotificationService: NotificationService { // swiftlint:disable:this type_body_length
+    // MARK: Properties
+
+    /// The delegate to handle login request actions originating from notifications.
+    private weak var delegate: NotificationServiceDelegate?
+
+    /// The service used by the application to manage the app's ID.
+    private let appIDService: AppIDService
+
+    /// The repository used by the application to manage auth data for the UI layer.
+    private let authRepository: AuthRepository
+
+    /// The service used by the application to handle authentication tasks.
+    private let authService: AuthService
+
+    /// The service used by the application to manage billing operations.
+    private let billingService: BillingService
+
+    /// The service to get server-specified configuration.
+    private let configService: ConfigService
+
+    /// The service used by the application to report non-fatal errors.
+    private let errorReporter: ErrorReporter
+
+    /// The service used by the application for recording temporary debug logs.
+    private let flightRecorder: FlightRecorder
+
+    /// The API service used to make notification requests.
+    private let notificationAPIService: NotificationAPIService
+
+    /// The API service used to refresh tokens.
+    private let refreshableApiService: RefreshableAPIService
+
+    /// The service used by the application to manage account state.
+    private let stateService: StateService
+
+    /// The service used to handle syncing vault data with the API.
+    private let syncService: SyncService
+
+    // MARK: Initialization
+
+    /// Initializes the `DefaultNotificationService`.
+    ///
+    /// - Parameters:
+    ///   - appIDService: The service used by the application to manage the app's ID.
+    ///   - authRepository: The repository used by the application to manage auth data for the UI layer.
+    ///   - authService: The service used by the application to handle authentication tasks.
+    ///   - billingService: The service used by the application to manage billing operations.
+    ///   - configService: The service to get server-specified configuration.
+    ///   - errorReporter: The service used by the application to report non-fatal errors.
+    ///   - flightRecorder: The service used by the application for recording temporary debug logs.
+    ///   - notificationAPIService: The API service used to make notification requests.
+    ///   - refreshableApiService: The API service used to refresh tokens.
+    ///   - stateService: The service used by the application to manage account state.
+    ///   - syncService: The service used to handle syncing vault data with the API.
+    init(
+        appIDService: AppIDService,
+        authRepository: AuthRepository,
+        authService: AuthService,
+        billingService: BillingService,
+        configService: ConfigService,
+        errorReporter: ErrorReporter,
+        flightRecorder: FlightRecorder,
+        notificationAPIService: NotificationAPIService,
+        refreshableApiService: RefreshableAPIService,
+        stateService: StateService,
+        syncService: SyncService,
+    ) {
+        self.appIDService = appIDService
+        self.authRepository = authRepository
+        self.authService = authService
+        self.billingService = billingService
+        self.configService = configService
+        self.errorReporter = errorReporter
+        self.flightRecorder = flightRecorder
+        self.notificationAPIService = notificationAPIService
+        self.refreshableApiService = refreshableApiService
+        self.stateService = stateService
+        self.syncService = syncService
+    }
+
+    // MARK: Methods
+
+    func setDelegate(_ delegate: NotificationServiceDelegate?) {
+        self.delegate = delegate
+    }
+
+    func didRegister(withToken tokenData: Data) async {
+        do {
+            // Don't proceed unless the user is authenticated.
+            guard try await stateService.isAuthenticated() else { return }
+
+            // Get the app ID.
+            let appId = await appIDService.getOrCreateAppID()
+
+            // Decode and save the push notification token.
+            let token = tokenData.map { String(format: "%02.2hhx", $0) }.joined()
+            try await notificationAPIService.savePushNotificationToken(for: appId, token: token)
+
+            // Record the date that the token was saved.
+            try await stateService.setNotificationsLastRegistrationDate(Date())
+        } catch {
+            errorReporter.log(error: error)
+        }
+    }
+
+    func messageReceived( // swiftlint:disable:this function_body_length cyclomatic_complexity
+        _ message: [AnyHashable: Any],
+        notificationDismissed: Bool?,
+        notificationTapped: Bool?,
+    ) async {
+        do {
+            // First attempt to decode the message as a response.
+            if await handleLoginRequestResponse(
+                message,
+                notificationDismissed: notificationDismissed,
+                notificationTapped: notificationTapped,
+            ) { return }
+
+            // Proceed to treat the message as new notification.
+            guard try await stateService.isAuthenticated(),
+                  let notificationData = try await decodePayload(message),
+                  let type = notificationData.type
+            else { return }
+            let userId = try await stateService.getActiveAccountId()
+
+            Logger.application.debug("Notification received: \(message, privacy: .public)")
+            await flightRecorder.log("[Notification] Received push notification, type: \(type)")
+
+            // Handle the notification according to the type of data.
+            switch type {
+            case .syncCipherCreate,
+                 .syncCipherUpdate:
+                let data: SyncCipherNotification = try notificationData.data()
+                if await checkActiveUser(notification: data, type: type, userId: userId) {
+                    try await syncService.fetchUpsertSyncCipher(data: data)
+                }
+            case .syncFolderCreate,
+                 .syncFolderUpdate:
+                let data: SyncFolderNotification = try notificationData.data()
+                if await checkActiveUser(notification: data, type: type, userId: userId) {
+                    try await syncService.fetchUpsertSyncFolder(data: data)
+                }
+            case .syncCipherDelete,
+                 .syncLoginDelete:
+                let data: SyncCipherNotification = try notificationData.data()
+                if await checkActiveUser(notification: data, type: type, userId: userId) {
+                    try await syncService.deleteCipher(data: data)
+                }
+            case .syncFolderDelete:
+                let data: SyncFolderNotification = try notificationData.data()
+                if await checkActiveUser(notification: data, type: type, userId: userId) {
+                    try await syncService.deleteFolder(data: data)
+                }
+            case .syncCiphers,
+                 .syncSettings,
+                 .syncVault:
+                try await syncService.fetchSync(forceSync: false)
+            case .syncOrgKeys:
+                try await refreshableApiService.refreshAccessToken()
+                try await syncService.fetchSync(forceSync: true)
+            case .logOut:
+                let data: LogoutNotification = try notificationData.data()
+
+                if data.reason == .kdfChange,
+                   // TODO: PM-26960 Remove user ID check with noLogoutOnKdfChange feature flag.
+                   data.userId == userId,
+                   await configService.getFeatureFlag(.noLogoutOnKdfChange) {
+                    // Don't log the user out for KDF changes.
+                    break
+                }
+
+                try await authRepository.logout(userId: data.userId, userInitiated: true)
+                // Only route to landing page if the current active user was logged out.
+                if data.userId == userId {
+                    await delegate?.routeToLanding()
+                }
+            case .syncSendCreate,
+                 .syncSendUpdate:
+                let data: SyncSendNotification = try notificationData.data()
+                if await checkActiveUser(notification: data, type: type, userId: userId) {
+                    try await syncService.fetchUpsertSyncSend(data: data)
+                }
+            case .syncSendDelete:
+                let data: SyncSendNotification = try notificationData.data()
+                if await checkActiveUser(notification: data, type: type, userId: userId) {
+                    try await syncService.deleteSend(data: data)
+                }
+            case .authRequest:
+                // TODO: PM-33817 Remove isAlertNotification once all auth request pushes are
+                // alert-style and the silent push path is no longer needed.
+                let isAlertNotification = (message["aps"] as? [AnyHashable: Any])?["alert"] != nil
+                try await handleLoginRequest(notificationData, isAlertNotification: isAlertNotification)
+            case .authRequestResponse:
+                // No action necessary, since the LoginWithDeviceProcessor already checks for updates
+                // every few seconds.
+                break
+            case .policyChanged:
+                try await syncService.fetchSync(forceSync: false)
+            case .premiumStatusChanged:
+                await billingService.premiumStatusChanged()
+            }
+        } catch {
+            errorReporter.log(error: error)
+        }
+    }
+
+    func notificationAuthorization() async -> UNAuthorizationStatus {
+        await UNUserNotificationCenter.current().notificationSettings().authorizationStatus
+    }
+
+    func requestAuthorization(options: UNAuthorizationOptions) async throws -> Bool {
+        try await UNUserNotificationCenter.current().requestAuthorization(options: options)
+    }
+
+    // MARK: Private Methods
+
+    /// Checks whether a notification belongs to the active user, logging a skip message if not.
+    ///
+    /// - Parameters:
+    ///   - notification: The notification payload containing a user ID to check.
+    ///   - type: The notification type, used in the skip log message.
+    ///   - userId: The active user's ID.
+    ///
+    /// - Returns: `true` if the notification belongs to the active user, `false` otherwise.
+    ///
+    private func checkActiveUser(
+        notification: NotificationWithUser,
+        type: NotificationType,
+        userId: String,
+    ) async -> Bool {
+        guard notification.userId == userId else {
+            await flightRecorder.log("[Notification] Skipping \(type): userId does not match active user")
+            return false
+        }
+        return true
+    }
+
+    /// A helper function to decode the push notification payload.
+    ///
+    /// - Parameter message: The content of the push notification.
+    ///
+    /// - Returns: The decoded push notification data.
+    ///
+    private func decodePayload(_ message: [AnyHashable: Any]) async throws -> PushNotificationData? {
+        // Decode the content of the message.
+        let notificationData = try PushNotificationData(userInfo: message)
+
+        // Verify that the payload is not empty and that the context is correct.
+        let appId = await appIDService.getOrCreateAppID()
+        guard notificationData.payload?.isEmpty == false,
+              notificationData.contextId != appId
+        else { return nil }
+        return notificationData
+    }
+
+    /// A helper method to handle a login request push notification.
+    ///
+    /// - Parameters:
+    ///   - notificationData: The decoded payload from the push notification.
+    ///   - isAlertNotification: Whether the push notification is an alert (non-silent) notification.
+    ///     When `true`, the OS has already displayed the notification banner (enriched by the
+    ///     notification service extension), so creating a local notification is skipped to avoid
+    ///     showing the banner twice.
+    ///
+    private func handleLoginRequest(
+        _ notificationData: PushNotificationData,
+        isAlertNotification: Bool,
+    ) async throws {
+        let data: LoginRequestNotification = try notificationData.data()
+
+        // Get the email of the account that the login request is coming from.
+        let loginSourceAccount: Account
+        do {
+            loginSourceAccount = try await stateService.getAccount(userId: data.userId)
+        } catch StateServiceError.noAccounts {
+            await flightRecorder.log(
+                "[Notification] Received login request notification but account (\(data.userId)) not found",
+            )
+            return
+        }
+        let loginSourceEmail = loginSourceAccount.profile.email
+
+        // Save the notification data.
+        await stateService.setLoginRequest(data)
+
+        // For silent (background) pushes, create a local notification banner since the OS won't
+        // display one. For alert pushes, the OS already displayed the banner via the notification
+        // service extension, so skip creating a duplicate.
+        // TODO: PM-33817 Remove this block once all auth request pushes are alert-style.
+        if !isAlertNotification {
+            // Assemble the data to add to the in-app banner notification.
+            let loginRequestData = try? JSONEncoder().encode(LoginRequestPushNotification(
+                id: data.id,
+                timeoutInMinutes: Constants.loginRequestTimeoutMinutes,
+                userId: loginSourceAccount.profile.userId,
+            ))
+
+            // Create an in-app banner notification to tell the user about the login request.
+            let content = UNMutableNotificationContent()
+            content.title = Localizations.logInRequested
+            content.body = Localizations.confirmLogInAttemptForX(loginSourceEmail)
+            content.categoryIdentifier = "dismissableCategory"
+            if let loginRequestData,
+               let loginRequestEncoded = String(data: loginRequestData, encoding: .utf8) {
+                content.userInfo = ["notificationData": loginRequestEncoded]
+            }
+            let category = UNNotificationCategory(
+                identifier: "dismissableCategory",
+                actions: [.init(identifier: "Clear", title: Localizations.clear, options: [.foreground])],
+                intentIdentifiers: [],
+                options: [.customDismissAction],
+            )
+            UNUserNotificationCenter.current().setNotificationCategories([category])
+            let request = UNNotificationRequest(identifier: data.id, content: content, trigger: nil)
+            try await UNUserNotificationCenter.current().add(request)
+        }
+
+        try await showOrSwitchForLoginRequest(id: data.id, loginSourceAccount: loginSourceAccount, showAlert: true)
+    }
+
+    /// Attempt to decode the notification data as a response to a login notification banner.
+    ///
+    /// - Parameters:
+    ///   - message: The content of the push notification.
+    ///   - notificationDismissed: `true` if a notification banner has been dismissed.
+    ///   - notificationTapped: `true` if a notification banner has been tapped.
+    ///
+    /// - Returns: `true` if the message was able to be decoded as a response.
+    ///
+    private func handleLoginRequestResponse(
+        _ message: [AnyHashable: Any],
+        notificationDismissed: Bool?,
+        notificationTapped: Bool?,
+    ) async -> Bool {
+        // TODO: PM-33817 Remove this branch (including handleNotificationDismissed and the
+        // notificationData userInfo key) once all auth request pushes are alert-style and locally
+        // created notification banners are no longer needed.
+        if let content = message["notificationData"] as? String,
+           let jsonData = content.data(using: .utf8),
+           let loginRequestData = try? JSONDecoder.pascalOrSnakeCaseDecoder.decode(
+               LoginRequestPushNotification.self,
+               from: jsonData,
+           ) {
+            // Handle taps/dismissals of local notification banners created for silent auth request pushes.
+            if notificationDismissed == true {
+                await handleNotificationDismissed()
+                return true
+            }
+            if notificationTapped == true {
+                await handleNotificationTapped(loginRequestData)
+                return true
+            }
+        } else if notificationTapped == true {
+            // Handle taps of alert push notifications (sent directly by the backend, enriched by the
+            // notification service extension). These don't carry a `notificationData` key, so the
+            // push payload is decoded directly.
+            do {
+                guard let notificationData = try await decodePayload(message) else { return false }
+                let loginRequest: LoginRequestNotification = try notificationData.data()
+                await handleNotificationTapped(
+                    LoginRequestPushNotification(
+                        id: loginRequest.id,
+                        timeoutInMinutes: Constants.loginRequestTimeoutMinutes,
+                        userId: loginRequest.userId,
+                    ),
+                )
+                return true
+            } catch {
+                errorReporter.log(error: error)
+                return false
+            }
+        }
+        return false
+    }
+
+    /// Handle a banner notification being dismissed.
+    private func handleNotificationDismissed() async {
+        // If the notification banner was dismissed, clear the cached value.
+        await stateService.setLoginRequest(nil)
+    }
+
+    /// Handle a banner notification with login request data being tapped.
+    private func handleNotificationTapped(_ loginRequestData: LoginRequestPushNotification) async {
+        do {
+            let loginSourceAccount = try await stateService.getAccount(userId: loginRequestData.userId)
+
+            try await showOrSwitchForLoginRequest(
+                id: loginRequestData.id,
+                loginSourceAccount: loginSourceAccount,
+                showAlert: false,
+            )
+        } catch StateServiceError.noAccounts {
+            let userId = loginRequestData.userId
+            await flightRecorder.log(
+                "[Notification] Notification tapped for login request but account (\(userId)) not found",
+            )
+        } catch {
+            errorReporter.log(error: error)
+        }
+    }
+
+    /// Shows the login request if it belongs to the active account, or switches to the account
+    /// that owns it.
+    ///
+    /// - Parameters:
+    ///   - id: The ID of the login request.
+    ///   - loginSourceAccount: The account the login request belongs to.
+    ///   - showAlert: Whether to prompt the user before switching accounts (`true` when receiving
+    ///     a new push, `false` when the user has already tapped a notification banner).
+    ///
+    private func showOrSwitchForLoginRequest(
+        id: String?,
+        loginSourceAccount: Account,
+        showAlert: Bool,
+    ) async throws {
+        let activeAccountId = try await stateService.getActiveAccountId()
+        if activeAccountId == loginSourceAccount.profile.userId {
+            do {
+                guard let id,
+                      let loginRequest = try await authService.getPendingLoginRequest(withId: id).first
+                else { return }
+                await delegate?.showLoginRequest(loginRequest)
+            } catch is PendingLoginRequestError {
+                // Login request no longer exists on the server (e.g., expired); clear it from state.
+                await stateService.setLoginRequest(nil)
+            }
+        } else {
+            await delegate?.switchAccountsForLoginRequest(to: loginSourceAccount, showAlert: showAlert)
+        }
+    }
+} // swiftlint:disable:this file_length

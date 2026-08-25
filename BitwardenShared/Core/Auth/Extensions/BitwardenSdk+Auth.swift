@@ -1,0 +1,49 @@
+// swiftlint:disable:this file_name
+
+import BitwardenSdk
+
+extension BitwardenSdk.InitUserCryptoMethod {
+    /// A safe string representation of the crypto method that excludes sensitive associated values.
+    var methodType: String {
+        switch self {
+        case .authRequest:
+            "Auth Request"
+        case .decryptedKey:
+            "Decrypted Key (Never Lock/Biometrics)"
+        case .deviceKey:
+            "Device Key"
+        case .keyConnector:
+            "Key Connector"
+        case .keyConnectorUrl:
+            "Key Connector URL"
+        case .masterPasswordUnlock:
+            "Master Password Unlock"
+        case .pin:
+            "PIN"
+        case .pinEnvelope:
+            "PIN Envelope"
+        case .pinState:
+            "PIN State"
+        }
+    }
+}
+
+extension BitwardenSdk.MasterPasswordUnlockData {
+    init(responseModel model: MasterPasswordUnlockResponseModel) {
+        self.init(
+            kdf: model.kdf.sdkKdf,
+            masterKeyWrappedUserKey: model.masterKeyEncryptedUserKey,
+            salt: model.salt,
+        )
+    }
+}
+
+extension MasterPasswordUnlockResponseModel {
+    init(unlockData: BitwardenSdk.MasterPasswordUnlockData) {
+        self.init(
+            kdf: KdfConfig(kdf: unlockData.kdf),
+            masterKeyEncryptedUserKey: unlockData.masterKeyWrappedUserKey,
+            salt: unlockData.salt,
+        )
+    }
+}

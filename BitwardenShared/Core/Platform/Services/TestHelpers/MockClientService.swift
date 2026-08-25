@@ -1,0 +1,99 @@
+import BitwardenKit
+import BitwardenKitMocks
+import BitwardenSdk
+import BitwardenSdkMocks
+
+@testable import BitwardenShared
+
+class MockClientService: ClientService {
+    var mockAuth: MockAuthClientService
+    var mockAuthIsPreAuth = false
+    var mockAuthUserId: String?
+    var mockCrypto: MockCryptoClientProtocol
+    var mockExporters: MockExporterClientProtocol
+    var mockGenerators: MockGeneratorClientsProtocol
+    var mockGeneratorsIsPreAuth = false
+    var mockGeneratorsUserId: String?
+    var mockPlatform: MockPlatformClientService
+    var mockPlatformIsPreAuth = false
+    var mockPolicies: MockPoliciesClientProtocol
+    var mockSends: MockSendClientProtocol
+    var mockVault: MockVaultClientService
+    var platformCallCount = 0
+    var platformError: Error?
+    var policiesError: Error?
+    var userClientArray = [String: BitwardenSdkClient]()
+
+    init(
+        auth: MockAuthClientService = MockAuthClientService(),
+        crypto: MockCryptoClientProtocol = MockCryptoClientProtocol(),
+        exporters: MockExporterClientProtocol = MockExporterClientProtocol(),
+        generators: MockGeneratorClientsProtocol = MockGeneratorClientsProtocol(),
+        platform: MockPlatformClientService = MockPlatformClientService.withMocks(),
+        policies: MockPoliciesClientProtocol = MockPoliciesClientProtocol(),
+        sends: MockSendClientProtocol = {
+            let mock = MockSendClientProtocol()
+            mock.decryptClosure = { SendView(send: $0) }
+            mock.encryptClosure = { Send(sendView: $0) }
+            mock.encryptBufferClosure = { _, buffer in buffer }
+            return mock
+        }(),
+        vault: MockVaultClientService = MockVaultClientService(),
+    ) {
+        mockAuth = auth
+        mockCrypto = crypto
+        mockExporters = exporters
+        mockGenerators = generators
+        mockPlatform = platform
+        mockPolicies = policies
+        mockSends = sends
+        mockVault = vault
+    }
+
+    func auth(for userId: String?, isPreAuth: Bool) -> AuthClientService {
+        mockAuthIsPreAuth = isPreAuth
+        mockAuthUserId = userId
+        return mockAuth
+    }
+
+    func crypto(for userId: String?) -> CryptoClientProtocol {
+        mockCrypto
+    }
+
+    func exporters(for userId: String?) -> ExporterClientProtocol {
+        mockExporters
+    }
+
+    func generators(for userId: String?, isPreAuth: Bool) -> GeneratorClientsProtocol {
+        mockGeneratorsIsPreAuth = isPreAuth
+        mockGeneratorsUserId = userId
+        return mockGenerators
+    }
+
+    func platform(for userId: String?, isPreAuth: Bool) throws -> PlatformClientService {
+        platformCallCount += 1
+        if let platformError {
+            throw platformError
+        }
+        mockPlatformIsPreAuth = isPreAuth
+        return mockPlatform
+    }
+
+    func policies(for userId: String?) throws -> PoliciesClientProtocol {
+        if let policiesError { throw policiesError }
+        return mockPolicies
+    }
+
+    func removeClient(for userId: String?) async throws {
+        guard let userId else { return }
+        userClientArray.removeValue(forKey: userId)
+    }
+
+    func sends(for userId: String?) -> SendClientProtocol {
+        mockSends
+    }
+
+    func vault(for userId: String?) -> VaultClientService {
+        mockVault
+    }
+}

@@ -1,0 +1,303 @@
+import BitwardenKit
+import Combine
+import Foundation
+
+// MARK: - StateService
+
+/// A protocol for a `StateService` which manages the saved state of the app
+///
+protocol StateService: AnyObject, DebugStateService {
+    /// The language option currently selected for the app.
+    var appLanguage: LanguageOption { get set }
+
+    /// Whether the user has seen the welcome tutorial.
+    ///
+    var hasSeenWelcomeTutorial: Bool { get set }
+
+    /// Gets the active account id.
+    ///
+    /// - Returns: The active user account id.
+    ///
+    func getActiveAccountId() async -> String
+
+    /// Get the app theme.
+    ///
+    /// - Returns: The app theme.
+    ///
+    func getAppTheme() async -> AppTheme
+
+    /// Gets the clear clipboard value for an account.
+    ///
+    /// - Parameter userId: The user ID associated with the clear clipboard value. Defaults to the active
+    ///   account if `nil`
+    /// - Returns: The time after which the clipboard should clear.
+    ///
+    func getClearClipboardValue(userId: String?) async throws -> ClearClipboardValue
+
+    /// Gets the data for the flight recorder.
+    ///
+    /// - Returns: The flight recorder data.
+    ///
+    func getFlightRecorderData() async -> FlightRecorderData?
+
+    /// Gets the user's encryption secret key.
+    ///
+    /// - Returns: The user's encryption secret key.
+    ///
+    func getSecretKey(userId: String?) async throws -> String?
+
+    /// Gets the session timeout value for the logged in user.
+    ///
+    /// - Returns: The session timeout value.
+    ///
+    func getVaultTimeout() async -> SessionTimeoutValue
+
+    /// Sets the app theme.
+    ///
+    /// - Parameter appTheme: The new app theme.
+    ///
+    func setAppTheme(_ appTheme: AppTheme) async
+
+    /// Sets the clear clipboard value for an account.
+    ///
+    /// - Parameters:
+    ///   - clearClipboardValue: The time after which to clear the clipboard.
+    ///   - userId: The user ID of the account. Defaults to the active account if `nil`.
+    ///
+    func setClearClipboardValue(_ clearClipboardValue: ClearClipboardValue?, userId: String?) async throws
+
+    /// Sets the data for the flight recorder.
+    ///
+    func setFlightRecorderData(_ data: FlightRecorderData?) async
+
+    /// Sets the user's encryption secret key.
+    ///
+    /// - Parameters:
+    ///   - key: The key to set
+    ///
+    func setSecretKey(_ key: String, userId: String?) async throws
+
+    // MARK: Publishers
+
+    /// A publisher for the app theme.
+    ///
+    /// - Returns: A publisher for the app theme.
+    ///
+    func appThemePublisher() async -> AnyPublisher<AppTheme, Never>
+}
+
+// MARK: - DebugStateService
+
+extension StateService {
+    func addFillAssistDebugRule(
+        domain: String,
+        usernameFieldId: String,
+        passwordFieldId: String,
+    ) async throws {}
+
+    func clearFillAssistCache() async throws {}
+
+    func clearMasterPasswordUnlockForActiveAccount() async throws {}
+}
+
+// MARK: - StateServiceError
+
+/// The errors thrown from a `StateService`.
+///
+enum StateServiceError: Error {
+    /// There are no known accounts.
+    case noAccounts
+
+    /// There isn't an active account.
+    case noActiveAccount
+
+    /// The user has no pin protected user key.
+    case noPinProtectedUserKey
+
+    /// The user has no user key.
+    case noEncUserKey
+}
+
+// MARK: - DefaultStateService
+
+/// A default implementation of `StateService`.
+///
+actor DefaultStateService:
+    StateService,
+    ActiveAccountStateProvider,
+    ConfigStateService,
+    FlightRecorderStateService,
+    LanguageStateService {
+    // MARK: Properties
+
+    /// The language option currently selected for the app.
+    nonisolated var appLanguage: LanguageOption {
+        get { LanguageOption(appSettingsStore.appLocale) }
+        set { appSettingsStore.appLocale = newValue.value }
+    }
+
+    nonisolated var hasSeenWelcomeTutorial: Bool {
+        get { appSettingsStore.hasSeenWelcomeTutorial }
+        set { appSettingsStore.hasSeenWelcomeTutorial = newValue }
+    }
+
+    // MARK: Private Properties
+
+    /// The service that persists app settings.
+    let appSettingsStore: AppSettingsStore
+
+    /// A subject containing the app theme.
+    private var appThemeSubject: CurrentValueSubject<AppTheme, Never>
+
+    /// The data store that handles performing data requests.
+    private let dataStore: DataStore
+
+    /// A subject containing whether to show the website icons.
+    private var showWebIconsSubject: CurrentValueSubject<Bool, Never>
+
+    // MARK: Initialization
+
+    /// Initialize a `DefaultStateService`.
+    ///
+    /// - Parameters:
+    ///  - appSettingsStore: The service that persists app settings.
+    ///  - dataStore: The data store that handles performing data requests.
+    ///
+    init(
+        appSettingsStore: AppSettingsStore,
+        dataStore: DataStore,
+    ) {
+        self.appSettingsStore = appSettingsStore
+        self.dataStore = dataStore
+
+        appThemeSubject = CurrentValueSubject(AppTheme(appSettingsStore.appTheme))
+        showWebIconsSubject = CurrentValueSubject(!appSettingsStore.disableWebIcons)
+    }
+
+    // MARK: Methods
+
+    func clearServerCommunicationCookieValue(hostname: String) async throws {
+        // no-op as there's no cookie to clear on the BWA app.
+    }
+
+    func getActiveAccountId() async -> String {
+        appSettingsStore.localUserId
+    }
+
+    func getAppTheme() async -> AppTheme {
+        AppTheme(appSettingsStore.appTheme)
+    }
+
+    func getClearClipboardValue(userId: String?) async throws -> ClearClipboardValue {
+        let userId = try userId ?? getActiveAccountUserId()
+        return appSettingsStore.clearClipboardValue(userId: userId)
+    }
+
+    func getFlightRecorderData() async -> FlightRecorderData? {
+        appSettingsStore.flightRecorderData
+    }
+
+    func getPreAuthServerConfig() async -> ServerConfig? {
+        appSettingsStore.preAuthServerConfig
+    }
+
+    func getSecretKey(userId: String?) async throws -> String? {
+        let userId = try userId ?? getActiveAccountUserId()
+        return appSettingsStore.secretKey(userId: userId)
+    }
+
+    func getServerConfig(userId: String?) async throws -> ServerConfig? {
+        let userId = try userId ?? getActiveAccountUserId()
+        return appSettingsStore.serverConfig(userId: userId)
+    }
+
+    func getVaultTimeout() async -> SessionTimeoutValue {
+        let accountId = await getActiveAccountId()
+        guard let rawValue = appSettingsStore.vaultTimeout(userId: accountId) else { return .never }
+
+        return SessionTimeoutValue(rawValue: rawValue)
+    }
+
+    func setAppTheme(_ appTheme: AppTheme) async {
+        appSettingsStore.appTheme = appTheme.value
+        appThemeSubject.send(appTheme)
+    }
+
+    func setClearClipboardValue(_ clearClipboardValue: ClearClipboardValue?, userId: String?) async throws {
+        let userId = try userId ?? getActiveAccountUserId()
+        appSettingsStore.setClearClipboardValue(clearClipboardValue, userId: userId)
+    }
+
+    func setFlightRecorderData(_ data: FlightRecorderData?) async {
+        appSettingsStore.flightRecorderData = data
+    }
+
+    func setPreAuthServerConfig(config: ServerConfig) async {
+        appSettingsStore.preAuthServerConfig = config
+    }
+
+    func setSecretKey(_ key: String, userId: String?) async throws {
+        let userId = try userId ?? getActiveAccountUserId()
+        appSettingsStore.setSecretKey(key, userId: userId)
+    }
+
+    func setServerConfig(_ config: ServerConfig?, userId: String?) async throws {
+        let userId = try userId ?? getActiveAccountUserId()
+        appSettingsStore.setServerConfig(config, userId: userId)
+    }
+
+    // MARK: Publishers
+
+    func appThemePublisher() async -> AnyPublisher<AppTheme, Never> {
+        appThemeSubject.eraseToAnyPublisher()
+    }
+
+    // MARK: Private
+
+    /// Returns the user ID for the active account.
+    ///
+    /// - Returns: The user ID for the active account.
+    ///
+    private func getActiveAccountUserId() throws -> String {
+        appSettingsStore.localUserId
+    }
+}
+
+// MARK: TOTPItemDisplayStateService
+
+extension DefaultStateService: TOTPItemDisplayStateService {
+    func getShowNextTOTPCode() async -> Bool {
+        appSettingsStore.showNextTOTPCode
+    }
+
+    func setShowNextTOTPCode(_ value: Bool) async {
+        appSettingsStore.showNextTOTPCode = value
+    }
+
+    func getShowWebIcons() async -> Bool {
+        !appSettingsStore.disableWebIcons
+    }
+
+    func setShowWebIcons(_ showWebIcons: Bool) async {
+        appSettingsStore.disableWebIcons = !showWebIcons
+        showWebIconsSubject.send(showWebIcons)
+    }
+
+    func showWebIconsPublisher() async -> AnyPublisher<Bool, Never> {
+        showWebIconsSubject.eraseToAnyPublisher()
+    }
+}
+
+// MARK: BiometricsStateService
+
+extension DefaultStateService: BiometricsStateService {
+    func getBiometricAuthenticationEnabled(userId: String?) async throws -> Bool {
+        let userId = try userId ?? getActiveAccountUserId()
+        return appSettingsStore.isBiometricAuthenticationEnabled(userId: userId)
+    }
+
+    func setBiometricAuthenticationEnabled(_ isEnabled: Bool?, userId: String?) async throws {
+        let userId = try userId ?? getActiveAccountUserId()
+        appSettingsStore.setBiometricAuthenticationEnabled(isEnabled, for: userId)
+    }
+}

@@ -1,0 +1,288 @@
+import BitwardenKit
+import BitwardenResources
+import SwiftUI
+
+// MARK: - AccountSecurityView
+
+/// A view that allows the user to update their account security settings.
+///
+struct AccountSecurityView: View {
+    // MARK: Properties
+
+    /// An action that opens URLs.
+    @Environment(\.openURL) private var openURL
+
+    /// The store used to render the view.
+    @ObservedObject var store: Store<AccountSecurityState, AccountSecurityAction, AccountSecurityEffect>
+
+    // MARK: View
+
+    var body: some View {
+        VStack(spacing: 16) {
+            setUpUnlockActionCard
+
+            pendingLoginRequests
+
+            if store.state.showUnlockOptions {
+                unlockOptionsSection
+            }
+
+            authenticatorSyncSection
+
+            sessionTimeoutSection
+
+            otherSection
+        }
+        .animation(.easeInOut, value: store.state.badgeState?.vaultUnlockSetupProgress == .complete)
+        .scrollView(backgroundColor: .clear)
+        .background {
+            FridayVaultBackdrop(motionEnabled: false)
+        }
+        .navigationBar(title: Localizations.accountSecurity, titleDisplayMode: .inline)
+        .onChange(of: store.state.twoStepLoginUrl) { newValue in
+            guard let url = newValue else { return }
+            openURL(url)
+            store.send(.clearTwoStepLoginUrl)
+        }
+        .onChange(of: store.state.fingerprintPhraseUrl) { newValue in
+            guard let url = newValue else { return }
+            openURL(url)
+            store.send(.clearFingerprintPhraseUrl)
+        }
+        .task {
+            await store.perform(.appeared)
+        }
+        .task {
+            await store.perform(.loadData)
+        }
+        .task {
+            await store.perform(.streamSettingsBadge)
+        }
+    }
+
+    // MARK: Private views
+
+    /// The action card for setting up vault unlock methods.
+    @ViewBuilder private var setUpUnlockActionCard: some View {
+        if let progress = store.state.badgeState?.vaultUnlockSetupProgress, progress != .complete {
+            ActionCard(
+                title: Localizations.setUpUnlock,
+                actionButtonState: ActionCard.ButtonState(title: Localizations.getStarted) {
+                    store.send(.showSetUpUnlock)
+                },
+                dismissButtonState: ActionCard.ButtonState(title: Localizations.dismiss) {
+                    await store.perform(.dismissSetUpUnlockActionCard)
+                },
+            ) {
+                BitwardenBadge(badgeValue: "1")
+            }
+        }
+    }
+
+    /// The other section.
+    private var otherSection: some View {
+        SectionView(Localizations.other) {
+            ContentBlock(dividerLeadingPadding: 16) {
+                SettingsListItem(
+                    Localizations.accountFingerprintPhrase,
+                    accessibilityIdentifier: "AccountFingerprintPhraseLabel",
+                ) {
+                    Task {
+                        await store.perform(.accountFingerprintPhrasePressed)
+                    }
+                }
+
+                SettingsListItem(
+                    Localizations.twoStepLogin,
+                    accessibilityIdentifier: "TwoStepLoginLinkItemView",
+                ) {
+                    store.send(.twoStepLoginPressed)
+                } trailingContent: {
+                    Image(asset: SharedAsset.Icons.externalLink24)
+                        .imageStyle(.rowIcon)
+                }
+
+                if store.state.isLockNowVisible {
+                    SettingsListItem(
+                        Localizations.lockNow,
+                        accessibilityIdentifier: "LockNowLabel",
+                    ) {
+                        Task {
+                            await store.perform(.lockVault)
+                        }
+                    }
+                }
+
+                SettingsListItem(
+                    Localizations.logOut,
+                    accessibilityIdentifier: "LogOutLabel",
+                ) {
+                    store.send(.logout)
+                }
+
+                SettingsListItem(
+                    Localizations.deleteAccount,
+                    accessibilityIdentifier: "DeleteAccountLabel",
+                ) {
+                    store.send(.deleteAccountPressed)
+                }
+            }
+        }
+    }
+
+    /// The pending login requests section.
+    private var pendingLoginRequests: some View {
+        SectionView(Localizations.approveLoginRequests) {
+            SettingsListItem(
+                Localizations.pendingLogInRequests,
+                accessibilityIdentifier: "PendingLogInRequestsLabel",
+            ) {
+                store.send(.pendingLoginRequestsTapped)
+            } trailingContent: {
+                Image(asset: SharedAsset.Icons.chevronRight16)
+                    .imageStyle(.accessoryIcon16)
+            }
+            .contentBlock()
+        }
+    }
+
+    /// The session timeout section.
+    private var sessionTimeoutSection: some View {
+        SectionView(Localizations.sessionTimeout, contentSpacing: 8) {
+            ContentBlock(dividerLeadingPadding: 16) {
+                BitwardenMenuField(
+                    title: Localizations.sessionTimeout,
+                    footer: store.state.policyTimeoutMessage,
+                    accessibilityIdentifier: "VaultTimeoutChooser",
+                    options: store.state.availableTimeoutOptions,
+                    selection: store.binding(
+                        get: \.sessionTimeoutValue,
+                        send: AccountSecurityAction.sessionTimeoutValueChanged,
+                    ),
+                )
+                .disabled(store.state.isSessionTimeoutPickerDisabled)
+
+                if store.state.isShowingCustomTimeout {
+                    SettingsPickerField(
+                        title: "",
+                        footer: store.state.policyTimeoutCustomMessage,
+                        customTimeoutValue: store.state.customTimeoutString,
+                        pickerValue: store.binding(
+                            get: \.customTimeoutValueSeconds,
+                            send: AccountSecurityAction.customTimeoutValueSecondsChanged,
+                        ),
+                        customTimeoutAccessibilityLabel: store.state.customTimeoutAccessibilityLabel,
+                    )
+                }
+            }
+            ContentBlock(dividerLeadingPadding: 16) {
+                BitwardenMenuField(
+                    title: Localizations.sessionTimeoutAction,
+                    footer: store.state.policyTimeoutActionMessage,
+                    accessibilityIdentifier: "VaultTimeoutActionChooser",
+                    options: store.state.availableTimeoutActions,
+                    selection: store.binding(
+                        get: \.sessionTimeoutAction,
+                        send: AccountSecurityAction.sessionTimeoutActionChanged,
+                    ),
+                )
+                .disabled(store.state.isSessionTimeoutActionDisabled)
+            }
+        }
+    }
+
+    /// The unlock options section.
+    private var unlockOptionsSection: some View {
+        SectionView(Localizations.unlockOptions) {
+            ContentBlock(dividerLeadingPadding: 16) {
+                biometricsSetting
+
+                if store.state.unlockWithPinFeatureAvailable {
+                    BitwardenToggle(
+                        Localizations.unlockWithPIN,
+                        isOn: store.bindingAsync(
+                            get: \.isUnlockWithPINCodeOn,
+                            perform: AccountSecurityEffect.toggleUnlockWithPINCode,
+                        ),
+                    )
+                    .accessibilityIdentifier("UnlockWithPinSwitch")
+                }
+            }
+        }
+    }
+
+    /// The authenticator sync section.
+    @ViewBuilder private var authenticatorSyncSection: some View {
+        SectionView(Localizations.authenticatorSync) {
+            BitwardenToggle(
+                Localizations.allowAuthenticatorSyncing,
+                isOn: store.bindingAsync(
+                    get: \.isAuthenticatorSyncEnabled,
+                    perform: AccountSecurityEffect.toggleSyncWithAuthenticator,
+                ),
+                accessibilityIdentifier: Localizations.allowAuthenticatorSyncing,
+            )
+            .contentBlock()
+        }
+    }
+
+    /// A view for the user's biometrics setting
+    ///
+    @ViewBuilder private var biometricsSetting: some View {
+        switch store.state.biometricUnlockStatus {
+        case let .available(type, enabled: enabled):
+            biometricUnlockToggle(enabled: enabled, type: type)
+        default:
+            EmptyView()
+        }
+    }
+
+    /// A toggle for the user's biometric unlock preference.
+    ///
+    @ViewBuilder
+    private func biometricUnlockToggle(enabled: Bool, type: BiometricAuthenticationType) -> some View {
+        let toggleText = biometricsToggleText(type)
+        BitwardenToggle(
+            toggleText,
+            isOn: store.bindingAsync(
+                get: { _ in enabled },
+                perform: AccountSecurityEffect.toggleUnlockWithBiometrics,
+            ),
+        )
+        .accessibilityIdentifier("UnlockWithBiometricsSwitch")
+        .accessibilityLabel(toggleText)
+    }
+
+    private func biometricsToggleText(_ biometryType: BiometricAuthenticationType) -> String {
+        switch biometryType {
+        case .faceID:
+            Localizations.unlockWithFaceID
+        case .opticID:
+            Localizations.unlockWithOpticID
+        case .touchID:
+            Localizations.unlockWithTouchID
+        case .unknown:
+            Localizations.unlockWithBiometrics
+        }
+    }
+}
+
+// MARK: - Previews
+
+#if DEBUG
+#Preview {
+    NavigationView {
+        AccountSecurityView(
+            store: Store(processor: StateProcessor(state: AccountSecurityState())),
+        )
+    }
+}
+
+#Preview("Vault Unlock Action Card") {
+    NavigationView {
+        AccountSecurityView(store: Store(processor: StateProcessor(state: AccountSecurityState(
+            badgeState: .fixture(vaultUnlockSetupProgress: .setUpLater),
+        ))))
+    }
+}
+#endif

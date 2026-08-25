@@ -1,0 +1,231 @@
+import AuthenticationServices
+import BitwardenSdk
+import Foundation
+
+@testable import BitwardenShared
+@testable import BitwardenSharedMocks
+
+class MockAuthService: AuthService {
+    var answerLoginRequestApprove: Bool?
+    var answerLoginRequestResult: Result<Void, Error> = .success(())
+    var answerLoginRequestRequest: BitwardenShared.LoginRequest?
+
+    var callbackUrlScheme: String = "callback"
+
+    var checkPendingLoginRequestId: String?
+    var checkPendingLoginRequestResult: Result<BitwardenShared.LoginRequest, Error> = .success(.fixture())
+
+    var denyAllLoginRequestsResult: Result<Void, Error> = .success(())
+    var denyAllLoginRequestsRequests: [BitwardenShared.LoginRequest]?
+
+    var generateSingleSignOnUrlResult: Result<(URL, String), Error> = .success((url: .example, state: "state"))
+    var generateSingleSignOnOrgIdentifier: String?
+
+    var getPendingAdminLoginRequestUserId: String?
+    var getPendingAdminLoginRequestResult: Result<PendingAdminLoginRequest, Error> = .success(.fixture())
+
+    var getPendingLoginRequestCalled = false
+    var getPendingLoginRequestId: String?
+    var getPendingLoginRequestResult: Result<[BitwardenShared.LoginRequest], Error> = .success([])
+
+    var hashPasswordPassword: String?
+    var hashPasswordResult: Result<String, Error> = .success("hashed")
+
+    var initiateLoginWithDeviceEmail: String?
+    var initiateLoginWithDeviceType: AuthRequestType?
+    var initiateLoginWithDeviceResult: Result<
+        (authRequestResponse: AuthRequestResponse, requestId: String), Error,
+    > = .success((.fixture(), ""))
+
+    var loginWithDeviceRequest: BitwardenShared.LoginRequest?
+    var loginWithDeviceEmail: String?
+    var loginWithDeviceIsAuthenticated: Bool?
+    var loginWithDeviceResult: Result<(String, String), Error> = .success(("", ""))
+
+    var loginWithMasterPasswordPassword: String?
+    var loginWithMasterPasswordUsername: String?
+    var loginWithMasterPasswordIsNewAccount = false
+    var loginWithMasterPasswordCallCount = 0
+    var loginWithMasterPasswordHandler: (() async throws -> Void)?
+    var loginWithMasterPasswordResult: Result<Void, Error> = .success(())
+
+    var loginWithSingleSignOnCode: String?
+    var loginWithSingleSignOnResult: Result<LoginUnlockMethod, Error> = .success(.masterPassword(.fixture()))
+
+    var loginWithTwoFactorCodeEmail: String?
+    var loginWithTwoFactorCodeCode: String?
+    var loginWithTwoFactorCodeMethod: TwoFactorAuthMethod?
+    var loginWithTwoFactorCodeRemember: Bool?
+    var loginWithTwoFactorCodeResult: Result<LoginUnlockMethod, Error> = .success(.masterPassword(.fixture()))
+    var publicKey: String = ""
+    var requirePasswordChangeResult: Result<Bool, Error> = .success(false)
+    var resendVerificationCodeEmailResult: Result<Void, Error> = .success(())
+    var sentVerificationEmail = false
+    var resendNewDeviceOtpResult: Result<Void, Error> = .success(())
+    var sentNewDeviceOtp = false
+
+    var setPendingAdminLoginRequest: PendingAdminLoginRequest?
+    var setPendingAdminLoginRequestResult: Result<Void, Error> = .success(())
+
+    var webAuthenticationSession: ASWebAuthenticationSession?
+    var webAuthenticationSessionCallbackKind: AuthWebSessionCallbackKind?
+    var webAuthenticationSessionUrl: URL?
+
+    func answerLoginRequest(_ request: BitwardenShared.LoginRequest, approve: Bool) async throws {
+        answerLoginRequestRequest = request
+        answerLoginRequestApprove = approve
+        try answerLoginRequestResult.get()
+    }
+
+    func checkPendingLoginRequest(withId id: String) async throws -> BitwardenShared.LoginRequest {
+        checkPendingLoginRequestId = id
+        return try checkPendingLoginRequestResult.get()
+    }
+
+    func denyAllLoginRequests(_ requests: [BitwardenShared.LoginRequest]) async throws {
+        denyAllLoginRequestsRequests = requests
+        try denyAllLoginRequestsResult.get()
+    }
+
+    func generateSingleSignOnUrl(from organizationIdentifier: String) async throws -> (url: URL, state: String) {
+        generateSingleSignOnOrgIdentifier = organizationIdentifier
+        return try generateSingleSignOnUrlResult.get()
+    }
+
+    func getPendingAdminLoginRequest(userId: String?) async throws -> PendingAdminLoginRequest? {
+        getPendingAdminLoginRequestUserId = userId
+        return try getPendingAdminLoginRequestResult.get()
+    }
+
+    func getPendingLoginRequest(withId id: String?) async throws -> [BitwardenShared.LoginRequest] {
+        getPendingLoginRequestCalled = true
+        getPendingLoginRequestId = id
+        return try getPendingLoginRequestResult.get()
+    }
+
+    func hashPassword(password: String, purpose _: HashPurpose) async throws -> String {
+        hashPasswordPassword = password
+        return try hashPasswordResult.get()
+    }
+
+    func initiateLoginWithDevice(
+        email: String,
+        type: AuthRequestType,
+    ) async throws -> (authRequestResponse: AuthRequestResponse, requestId: String) {
+        initiateLoginWithDeviceEmail = email
+        initiateLoginWithDeviceType = type
+        return try initiateLoginWithDeviceResult.get()
+    }
+
+    func loginWithDevice(
+        _ loginRequest: BitwardenShared.LoginRequest,
+        email: String,
+        isAuthenticated: Bool,
+    ) async throws -> (String, String) {
+        loginWithDeviceRequest = loginRequest
+        loginWithDeviceEmail = email
+        loginWithDeviceIsAuthenticated = isAuthenticated
+        return try loginWithDeviceResult.get()
+    }
+
+    func loginWithMasterPassword(
+        _ password: String,
+        username: String,
+        isNewAccount: Bool,
+    ) async throws {
+        loginWithMasterPasswordCallCount += 1
+        loginWithMasterPasswordPassword = password
+        loginWithMasterPasswordUsername = username
+        loginWithMasterPasswordIsNewAccount = isNewAccount
+        if let loginWithMasterPasswordHandler {
+            try await loginWithMasterPasswordHandler()
+        } else {
+            try loginWithMasterPasswordResult.get()
+        }
+    }
+
+    func loginWithSingleSignOn(code: String, email _: String) async throws -> LoginUnlockMethod {
+        loginWithSingleSignOnCode = code
+        return try loginWithSingleSignOnResult.get()
+    }
+
+    func loginWithTwoFactorCode(
+        email: String,
+        code: String,
+        method: TwoFactorAuthMethod,
+        remember: Bool,
+    ) async throws -> LoginUnlockMethod {
+        loginWithTwoFactorCodeEmail = email
+        loginWithTwoFactorCodeCode = code
+        loginWithTwoFactorCodeMethod = method
+        loginWithTwoFactorCodeRemember = remember
+        return try loginWithTwoFactorCodeResult.get()
+    }
+
+    func requirePasswordChange(
+        email: String,
+        isPreAuth: Bool,
+        masterPassword: String,
+        policy: BitwardenSdk.MasterPasswordPolicyOptions?,
+    ) async throws -> Bool {
+        try requirePasswordChangeResult.get()
+    }
+
+    func resendNewDeviceOtp() async throws {
+        sentNewDeviceOtp = true
+        try resendNewDeviceOtpResult.get()
+    }
+
+    func resendVerificationCodeEmail() async throws {
+        sentVerificationEmail = true
+        try resendVerificationCodeEmailResult.get()
+    }
+
+    func setPendingAdminLoginRequest(_ adminLoginRequest: PendingAdminLoginRequest?, userId: String?) async throws {
+        setPendingAdminLoginRequest = adminLoginRequest
+        try setPendingAdminLoginRequestResult.get()
+    }
+
+    func webAuthenticationSession(
+        url: URL,
+        callbackKind: AuthWebSessionCallbackKind,
+        completionHandler: @escaping ASWebAuthenticationSession.CompletionHandler,
+    ) -> ASWebAuthenticationSession {
+        webAuthenticationSessionCallbackKind = callbackKind
+        webAuthenticationSessionUrl = url
+        let mockSession = MockWebAuthenticationSession(
+            url: url,
+            callbackURLScheme: callbackUrlScheme,
+            completionHandler: completionHandler,
+        )
+        webAuthenticationSession = mockSession
+        return mockSession
+    }
+}
+
+// MARK: - MockWebAuthenticationSession
+
+class MockWebAuthenticationSession: ASWebAuthenticationSession {
+    var startCalled = false
+    var startReturn = true
+
+    var initUrl: URL
+    var initCallbackURLScheme: String?
+    var initCompletionHandler: ASWebAuthenticationSession.CompletionHandler
+
+    override init(
+        url URL: URL,
+        callbackURLScheme: String?,
+        completionHandler: @escaping ASWebAuthenticationSession.CompletionHandler,
+    ) {
+        initUrl = URL
+        initCallbackURLScheme = callbackURLScheme
+        initCompletionHandler = completionHandler
+        super.init(url: URL, callbackURLScheme: callbackURLScheme, completionHandler: completionHandler)
+    }
+
+    override func start() -> Bool {
+        startCalled = true
+        return startReturn
+    }
+}

@@ -1,0 +1,45 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "github>bitwarden/renovate-config"
+  ],
+  "labels": ["t:deps"],
+  "enabledManagers": [
+    "bundler",
+    "github-actions",
+    "mint",
+    "custom.regex",
+    "swift",
+    "xcodegen"
+  ],
+  "ignoreDeps": ["bitwarden/sdk-swift"],
+  "xcodegen": {
+    "managerFilePatterns": ["/project(-[a-z]+)?\\.yml$/"]
+  },
+  "customManagers": [
+    {
+      "customType": "regex",
+      "managerFilePatterns": [
+        "/\\.github/workflows/test\\.yml$/",
+        "/\\.github/workflows/test-bwa\\.yml$/"
+      ],
+      "matchStrings": [
+        "uses: codecov/codecov-action@[a-f0-9]+(?:[^\\n]*\\n){1,10}[^\\n]*version: (?<currentValue>v\\d+\\.\\d+\\.\\d+)"
+      ],
+      "depNameTemplate": "getsentry/prevent-cli",
+      "datasourceTemplate": "github-releases"
+    }
+  ],
+  "packageRules": [
+    {
+      "groupName": "gh minor",
+      "matchManagers": [
+        "github-actions"
+      ],
+      "matchUpdateTypes": [
+        "minor",
+        "patch"
+      ]
+    }
+  ]
+}

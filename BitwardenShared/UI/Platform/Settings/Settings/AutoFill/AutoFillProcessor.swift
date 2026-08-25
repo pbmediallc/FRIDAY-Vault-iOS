@@ -1,0 +1,247 @@
+import BitwardenKit
+import BitwardenResources
+
+// MARK: - AutoFillProcessor
+
+/// The processor used to manage state and handle actions for the auto-fill screen.
+///
+final class AutoFillProcessor: StateProcessor<AutoFillState, AutoFillAction, AutoFillEffect> {
+    // MARK: Types
+
+    typealias Services = HasASSettingsMediator
+        & HasAutofillCredentialService
+        & HasConfigService
+        & HasErrorReporter
+        & HasFillAssistRepository
+        & HasSettingsRepository
+        & HasStateService
+        & HasTimeProvider
+
+    // MARK: Properties
+
+    /// The `Coordinator` that handles navigation.
+    private let coordinator: AnyCoordinator<SettingsRoute, SettingsEvent>
+
+    /// The services used by this processor.
+    private var services: Services
+
+    // MARK: Initialization
+
+    /// Initializes a new `AutoFillProcessor`.
+    ///
+    /// - Parameters:
+    ///   - coordinator: The `Coordinator` that handles navigation.
+    ///   - services: The services used by this processor.
+    ///   - state: The initial state of the processor.
+    ///
+    init(
+        coordinator: AnyCoordinator<SettingsRoute, SettingsEvent>,
+        services: Services,
+        state: AutoFillState,
+    ) {
+        self.coordinator = coordinator
+        self.services = services
+        super.init(state: state)
+    }
+
+    // MARK: Methods
+
+    override func perform(_ effect: AutoFillEffect) async {
+        switch effect {
+        case .dismissSetUpAutofillActionCard:
+            await dismissSetUpAutofillActionCard()
+        case .fetchSettingValues:
+            await fetchSettingValues()
+        case .setUpAutofill:
+            await setUpAutofill()
+        case .streamSettingsBadge:
+            await streamSettingsBadge()
+        }
+    }
+
+    override func receive(_ action: AutoFillAction) {
+        switch action {
+        case .appExtensionTapped:
+            coordinator.navigate(to: .appExtension)
+        case .clearUrl:
+            state.url = nil
+        case let .defaultUriMatchTypeChanged(newValue):
+            Task {
+                await confirmAndUpdateDefaultUriMatchType(newValue)
+            }
+        case .learnMoreAboutAutofillTapped:
+            state.url = ExternalLinksConstants.autofillHelp
+        case .passwordAutoFillTapped:
+            coordinator.navigate(to: .passwordAutoFill, context: self)
+        case let .toggleFillAssist(isOn):
+            state.isFillAssistEnabled = isOn
+            Task {
+                await updateFillAssistEnabled(isOn)
+            }
+        case let .toggleCopyTOTPToggle(isOn):
+            state.isCopyTOTPToggleOn = isOn
+            Task {
+                await updateDisableAutoTotpCopy(!isOn)
+            }
+        case let .toastShown(newValue):
+            state.toast = newValue
+        }
+    }
+
+    // MARK: Private
+
+    /// Displays a warning for user to confirm if wants to update the defaultUriMatchType if necessary
+    ///
+    /// - Parameter defaultUriMatchType: The default URI match type.
+    ///
+    private func confirmAndUpdateDefaultUriMatchType(_ defaultUriMatchType: UriMatchType) async {
+        switch defaultUriMatchType {
+        case .regularExpression:
+            coordinator.showAlert(
+                .confirmRegularExpressionMatchDetectionAlert {
+                    await self.updateDefaultUriMatchType(
+                        defaultUriMatchType,
+                        learnMoreLocalizedMatchType: Localizations.regEx,
+                    )
+                },
+            )
+        case .startsWith:
+            coordinator.showAlert(
+                .confirmStartsWithMatchDetectionAlert {
+                    await self.updateDefaultUriMatchType(
+                        defaultUriMatchType,
+                        learnMoreLocalizedMatchType: Localizations.startsWith,
+                    )
+                },
+            )
+        default:
+            await updateDefaultUriMatchType(
+                defaultUriMatchType,
+                learnMoreLocalizedMatchType: nil,
+            )
+        }
+    }
+
+    /// Dismisses the set up autofill action card by marking the user's vault autofill setup progress complete.
+    ///
+    private func dismissSetUpAutofillActionCard() async {
+        do {
+            try await services.stateService.setAccountSetupAutofill(.complete)
+        } catch {
+            services.errorReporter.log(error: error)
+            coordinator.showAlert(.defaultAlert(title: Localizations.anErrorHasOccurred))
+        }
+    }
+
+    /// Fetches the initial stored setting values for the view.
+    ///
+    private func fetchSettingValues() async {
+        state.defaultUriMatchType = await services.settingsRepository.getDefaultUriMatchType()
+        state.shouldShowPasswordAutofill = await !services.autofillCredentialService.isAutofillCredentialsEnabled()
+        state.isFillAssistFeatureFlagEnabled = await services.configService.getFeatureFlag(.fillAssistTargetingRules)
+        do {
+            state.isCopyTOTPToggleOn = try await !services.settingsRepository.getDisableAutoTotpCopy()
+            state.isFillAssistEnabled = try await services.stateService.getFillAssistEnabled()
+        } catch {
+            coordinator.showAlert(.defaultAlert(title: Localizations.anErrorHasOccurred))
+            services.errorReporter.log(error: error)
+        }
+    }
+
+    /// Sets up as credential provider for autofill.
+    private func setUpAutofill() async {
+        guard #available(iOS 18.0, *) else {
+            coordinator.navigate(to: .passwordAutoFill)
+            return
+        }
+
+        do {
+            let isOn = try await services.asSettingsMediator.requestToTurnOnCredentialProviderExtension()
+            guard isOn else { return }
+
+            await dismissSetUpAutofillActionCard()
+            state.toast = Toast(title: Localizations.autofillEnabled)
+        } catch ASSettingsMediatorError.cantRequest {
+            coordinator.navigate(to: .passwordAutoFill, context: self)
+        } catch {
+            services.errorReporter.log(error: error)
+        }
+    }
+
+    /// Streams the state of the badges in the settings tab.
+    ///
+    private func streamSettingsBadge() async {
+        do {
+            for await badgeState in try await services.stateService.settingsBadgePublisher().values {
+                state.badgeState = badgeState
+            }
+        } catch {
+            services.errorReporter.log(error: error)
+        }
+    }
+
+    /// Updates the default URI match type value for the user.
+    /// - Parameters:
+    ///   - updateUriMatchType: The new selected URI match type.
+    ///   - learnMoreLocalizedMatchType: The localized text to display on the learn more dialog.
+    ///
+    private func updateDefaultUriMatchType(
+        _ defaultUriMatchType: UriMatchType,
+        learnMoreLocalizedMatchType: String?,
+    ) async {
+        do {
+            state.defaultUriMatchType = defaultUriMatchType
+            try await services.settingsRepository.updateDefaultUriMatchType(defaultUriMatchType)
+
+            if let learnMoreText = learnMoreLocalizedMatchType, !learnMoreText.isEmpty {
+                showLearnMoreAlert(learnMoreText)
+            }
+        } catch {
+            coordinator.showAlert(.defaultAlert(title: Localizations.anErrorHasOccurred))
+            services.errorReporter.log(error: error)
+        }
+    }
+
+    /// Updates the disable auto-copy TOTP setting for the user.
+    ///
+    /// - Parameter disableAutoTotpCopy: Whether TOTP codes should be auto-copied during autofill.
+    ///
+    private func updateDisableAutoTotpCopy(_ disableAutoTotpCopy: Bool) async {
+        do {
+            try await services.settingsRepository.updateDisableAutoTotpCopy(disableAutoTotpCopy)
+        } catch {
+            coordinator.showAlert(.defaultAlert(title: Localizations.anErrorHasOccurred))
+            services.errorReporter.log(error: error)
+        }
+    }
+
+    /// Updates the Fill Assist enabled preference and triggers a rules sync if enabled.
+    ///
+    /// - Parameter fillAssistEnabled: Whether Fill Assist should be enabled.
+    ///
+    @MainActor
+    private func updateFillAssistEnabled(_ fillAssistEnabled: Bool) async {
+        // Guard against stale tasks: rapid toggling fires multiple concurrent tasks; bail out if
+        // the state has already moved past this task's intended value.
+        guard state.isFillAssistEnabled == fillAssistEnabled else { return }
+        do {
+            try await services.stateService.setFillAssistEnabled(fillAssistEnabled)
+            guard state.isFillAssistEnabled == fillAssistEnabled else { return }
+            if fillAssistEnabled {
+                await services.fillAssistRepository.syncRules()
+            }
+        } catch {
+            services.errorReporter.log(error: error)
+            guard state.isFillAssistEnabled == fillAssistEnabled else { return }
+            state.isFillAssistEnabled = !fillAssistEnabled
+            await coordinator.showErrorAlert(error: error)
+        }
+    }
+
+    /// Shows an alert asking the user if he wants to know more about Uri Matching
+    private func showLearnMoreAlert(_ defaultUriMatchTypeName: String) {
+        coordinator.showAlert(.learnMoreAdvancedMatchingDetection(defaultUriMatchTypeName) {
+            self.state.url = ExternalLinksConstants.uriMatchDetections
+        })
+    }
+}

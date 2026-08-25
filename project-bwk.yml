@@ -1,0 +1,322 @@
+name: BitwardenKit
+fileGroups:
+  - Configs
+configs:
+  Debug: debug
+  Release: release
+include:
+  - path: project-common.yml
+settings:
+  MARKETING_VERSION: 2026.4.0    # Bump this for a new version update.
+  CURRENT_PROJECT_VERSION: 1
+packages:
+  SwiftUIIntrospect:
+    url: https://github.com/siteline/SwiftUI-Introspect
+    exactVersion: 26.0.1
+schemes:
+  AuthenticatorBridgeKit:
+    build:
+      targets:
+        AuthenticatorBridgeKit: all
+        AuthenticatorBridgeKitTests: [test]
+    test:
+      gatherCoverageData: true
+      targets:
+        - AuthenticatorBridgeKitTests
+  BitwardenKit:
+    build:
+      targets:
+        BitwardenKit: all
+        BitwardenKitTests: [test]
+        BitwardenKitSnapshotTests: [test]
+        BitwardenKitViewInspectorTests: [test]
+    test:
+      gatherCoverageData: true
+      targets:
+        - BitwardenKitTests
+        - BitwardenKitSnapshotTests
+        - BitwardenKitViewInspectorTests
+      testPlans:
+        - path: TestPlans/BitwardenKit-Default.xctestplan
+          defaultPlan: true
+        - path: TestPlans/BitwardenKit-Unit.xctestplan
+        - path: TestPlans/BitwardenKit-Snapshot.xctestplan
+        - path: TestPlans/BitwardenKit-ViewInspector.xctestplan
+  BitwardenResources:
+    build:
+      targets:
+        BitwardenResources: all
+  BitwardenSdkMocks:
+    build:
+      targets:
+        BitwardenSdkMocks: all
+  Networking:
+    build:
+      targets:
+        Networking: all
+        NetworkingTests: [test]
+    test:
+      gatherCoverageData: true
+      targets:
+        - NetworkingTests
+targets:
+  AuthenticatorBridgeKit:
+    type: framework
+    platform: iOS
+    configFiles:
+      Debug: Configs/AuthenticatorBridgeKit.xcconfig
+      Release: Configs/AuthenticatorBridgeKit.xcconfig
+    settings:
+      base:
+        APPLICATION_EXTENSION_API_ONLY: true
+        INFOPLIST_FILE: AuthenticatorBridgeKit/Info.plist
+        SWIFT_STRICT_CONCURRENCY: complete
+    templates:
+      - CommonTarget
+      - SourceryTarget
+    templateAttributes:
+      sourcesPath: AuthenticatorBridgeKit
+    dependencies:
+      - target: BitwardenKit
+  AuthenticatorBridgeKitTests:
+    type: bundle.unit-test
+    platform: iOS
+    settings:
+      base:
+        INFOPLIST_FILE: AuthenticatorBridgeKit/Tests/TestHelpers/Support/Info.plist
+        SWIFT_STRICT_CONCURRENCY: complete
+    templates:
+      - TestTarget
+    templateAttributes:
+      sourcesPath: AuthenticatorBridgeKit
+    dependencies:
+      - target: AuthenticatorBridgeKit
+      - target: AuthenticatorBridgeKitMocks
+      - target: BitwardenKit
+      - target: BitwardenKitMocks
+      - target: TestHelpers
+    randomExecutionOrder: true
+  AuthenticatorBridgeKitMocks:
+    type: framework
+    platform: iOS
+    settings:
+      base:
+        ENABLE_TESTING_SEARCH_PATHS: YES
+        INFOPLIST_FILE: AuthenticatorBridgeKit/MocksInfo.plist
+        SWIFT_STRICT_CONCURRENCY: complete
+    templates:
+      - MocksTarget
+    templateAttributes:
+      sourcesPath: AuthenticatorBridgeKit
+    sources:
+      - path: AuthenticatorBridgeKit/Sourcery/Generated/AutoMockable.generated.swift
+        optional: true
+    dependencies:
+      - target: AuthenticatorBridgeKit
+      - target: BitwardenKit
+      - target: TestHelpers
+  BitwardenKit:
+    type: framework
+    platform: iOS
+    configFiles:
+      Debug: Configs/BitwardenKit-Debug.xcconfig
+      Release: Configs/BitwardenKit-Release.xcconfig
+    settings:
+      base:
+        APPLICATION_EXTENSION_API_ONLY: true
+        INFOPLIST_FILE: BitwardenKit/Info.plist
+    templates:
+      - CommonTarget
+      - SourceryTarget
+    templateAttributes:
+      sourcesPath: BitwardenKit
+    sources:
+      - path: BitwardenKit/Core/Platform/Utilities/SDKVersionInfo.swift
+        optional: true
+    preBuildScripts:
+      - name: Generate SDK Version Info
+        path: Scripts/generate-sdk-version-info.sh
+        basedOnDependencyAnalysis: true
+        inputFiles:
+          - $(SRCROOT)/project-common.yml
+        outputFiles:
+          - $(SRCROOT)/BitwardenKit/Core/Platform/Utilities/SDKVersionInfo.swift
+    dependencies:
+      - package: BitwardenSdk
+      - package: SwiftUIIntrospect
+      - target: BitwardenResources
+      - target: Networking
+  BitwardenKitMocks:
+    type: framework
+    platform: iOS
+    settings:
+      base:
+        ENABLE_TESTING_SEARCH_PATHS: YES
+        INFOPLIST_FILE: BitwardenKit/Application/Mocks/Support/Info.plist
+    templates:
+      - MocksTarget
+    templateAttributes:
+      sourcesPath: BitwardenKit
+    sources:
+      - path: BitwardenKit/Sourcery/Generated/AutoMockable.generated.swift
+        optional: true
+    dependencies:
+      - target: BitwardenKit
+      - package: BitwardenSdk
+      - target: BitwardenSdkMocks
+      - target: TestHelpers
+  BitwardenKitTests:
+    type: bundle.unit-test
+    platform: iOS
+    settings:
+      base:
+        INFOPLIST_FILE: BitwardenKit/Application/TestHelpers/Support/Info.plist
+    templates:
+      - TestTarget
+    templateAttributes:
+      sourcesPath: BitwardenKit
+    dependencies:
+      - target: AuthenticatorBridgeKitMocks
+      - target: BitwardenKit
+      - target: BitwardenKitMocks
+      - target: TestHelpers
+      - package: BitwardenSdk
+      - package: SnapshotTesting
+        product: InlineSnapshotTesting
+    randomExecutionOrder: true
+  BitwardenKitSnapshotTests:
+    type: bundle.unit-test
+    platform: iOS
+    settings:
+      base:
+        INFOPLIST_FILE: BitwardenKit/Application/TestHelpers/Support/Info.plist
+    templates:
+      - SnapshotTestTarget
+    templateAttributes:
+      sourcesPath: BitwardenKit
+    dependencies:
+      - target: AuthenticatorBridgeKitMocks
+      - target: BitwardenKit
+      - target: BitwardenKitMocks
+      - target: TestHelpers
+      - package: SnapshotTesting
+    randomExecutionOrder: true
+  BitwardenKitViewInspectorTests:
+    type: bundle.unit-test
+    platform: iOS
+    settings:
+      base:
+        INFOPLIST_FILE: BitwardenKit/Application/TestHelpers/Support/Info.plist
+    templates:
+      - ViewInspectorTestTarget
+    templateAttributes:
+      sourcesPath: BitwardenKit
+    dependencies:
+      - target: AuthenticatorBridgeKitMocks
+      - target: BitwardenKit
+      - target: BitwardenKitMocks
+      - target: TestHelpers
+      - target: ViewInspectorTestHelpers
+      - package: ViewInspector
+    randomExecutionOrder: true
+  BitwardenResources:
+    type: framework
+    platform: iOS
+    configFiles:
+      Debug: Configs/BitwardenResources-Debug.xcconfig
+      Release: Configs/BitwardenResources-Release.xcconfig
+    settings:
+      base:
+        APPLICATION_EXTENSION_API_ONLY: true
+        INFOPLIST_FILE: BitwardenResources/Info.plist
+    sources:
+      - path: BitwardenResources
+      - path: BitwardenResources/Generated/Fonts.swift
+        optional: true
+      - path: BitwardenResources/Generated/Localizations.swift
+        optional: true
+      - path: BitwardenResources/Generated/SharedAssets.swift
+        optional: true
+    preBuildScripts:
+      - name: SwiftGen
+        script: |
+          if [[ ! "$PATH" =~ "/opt/homebrew/bin" ]]; then
+            PATH="/opt/homebrew/bin:$PATH"
+          fi
+          mint run swiftgen config run --config "swiftgen-bwr.yml"
+        basedOnDependencyAnalysis: false
+        outputFiles:
+          - $(SRCROOT)/BitwardenResources/Generated/Fonts.swift
+          - $(SRCROOT)/BitwardenResources/Generated/Localizations.swift
+          - $(SRCROOT)/BitwardenResources/Generated/SharedAssets.swift
+  BitwardenSdkMocks:
+    type: framework
+    platform: iOS
+    settings:
+      base:
+        INFOPLIST_FILE: BitwardenSdkMocks/Info.plist
+    templates:
+      - CommonTarget
+      - SourceryTarget
+    templateAttributes:
+      sourcesPath: BitwardenSdkMocks
+    sources:
+      - path: BitwardenSdkMocks/Sourcery/Generated/AutoMockable.generated.swift
+        optional: true
+    dependencies:
+      - package: BitwardenSdk
+  Networking:
+    type: framework
+    platform: iOS
+    configFiles:
+      Debug: Configs/Networking.xcconfig
+      Release: Configs/Networking.xcconfig
+    settings:
+      base:
+        APPLICATION_EXTENSION_API_ONLY: true
+        INFOPLIST_FILE: Networking/Info.plist
+        SWIFT_STRICT_CONCURRENCY: complete
+    sources:
+      - path: Networking
+        excludes:
+          - "**/Tests/*"
+  NetworkingTests:
+    type: bundle.unit-test
+    platform: iOS
+    settings:
+      base:
+        INFOPLIST_FILE: Networking/Tests/NetworkingTests/Support/Info.plist
+        SWIFT_STRICT_CONCURRENCY: complete
+    sources:
+      - path: Networking
+        includes:
+          - "**/Tests/*"
+    dependencies:
+      - target: Networking
+    randomExecutionOrder: true
+  TestHelpers:
+    type: framework
+    platform: iOS
+    settings:
+      base:
+        ENABLE_TESTING_SEARCH_PATHS: YES
+        INFOPLIST_FILE: TestHelpers/Info.plist
+    sources:
+      - path: TestHelpers
+        excludes:
+          - "**/Info.plist"
+    dependencies:
+      - target: Networking
+      - package: SnapshotTesting
+  ViewInspectorTestHelpers:
+    type: framework
+    platform: iOS
+    settings:
+      base:
+        ENABLE_TESTING_SEARCH_PATHS: YES
+        GENERATE_INFOPLIST_FILE: YES
+    sources:
+      - path: ViewInspectorTestHelpers
+    dependencies:
+      - package: ViewInspector
+

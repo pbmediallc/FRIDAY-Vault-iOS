@@ -1,0 +1,613 @@
+import AVFoundation
+import BitwardenKit
+import BitwardenKitMocks
+import SwiftUI
+import XCTest
+
+@testable import BitwardenShared
+
+// swiftlint:disable file_length
+
+// MARK: - VaultItemCoordinatorTests
+
+class VaultItemCoordinatorTests: BitwardenTestCase { // swiftlint:disable:this type_body_length
+    // MARK: Properties
+
+    var appExtensionDelegate: MockAppExtensionDelegate!
+    var cameraService: MockCameraService!
+    var module: MockAppModule!
+    var stackNavigator: MockStackNavigator!
+    var subject: VaultItemCoordinator!
+    var vaultRepository: MockVaultRepository!
+
+    // MARK: Setup & Teardown
+
+    override func setUp() {
+        super.setUp()
+        appExtensionDelegate = MockAppExtensionDelegate()
+        cameraService = MockCameraService()
+        module = MockAppModule()
+        stackNavigator = MockStackNavigator()
+        vaultRepository = MockVaultRepository()
+        subject = VaultItemCoordinator(
+            appExtensionDelegate: appExtensionDelegate,
+            module: module,
+            services: ServiceContainer.withMocks(
+                cameraService: cameraService,
+                vaultRepository: vaultRepository,
+            ),
+            stackNavigator: stackNavigator,
+        )
+    }
+
+    override func tearDown() {
+        super.tearDown()
+        appExtensionDelegate = nil
+        cameraService = nil
+        module = nil
+        stackNavigator = nil
+        subject = nil
+        vaultRepository = nil
+    }
+
+    // MARK: Tests
+
+    /// `navigate(to:)` with `.addFolder` starts the add/edit folder coordinator and navigates
+    /// to the add/edit folder view.
+    @MainActor
+    func test_navigateTo_addFolder() throws {
+        subject.navigate(to: .addFolder)
+
+        XCTAssertTrue(module.addEditFolderCoordinator.isStarted)
+        XCTAssertEqual(module.addEditFolderCoordinator.routes, [.addEditFolder(folder: nil)])
+    }
+
+    /// `navigate(to:)` with `.addItem` without a group pushes the add item view onto the stack navigator.
+    @MainActor
+    func test_navigateTo_addItem_nonPremium() throws {
+        vaultRepository.doesActiveAccountHavePremiumResult = false
+        let task = Task {
+            subject.navigate(to: .addItem(type: .login))
+        }
+        waitFor(!stackNavigator.actions.isEmpty)
+        task.cancel()
+
+        let action = try XCTUnwrap(stackNavigator.actions.last)
+        XCTAssertEqual(action.type, .replaced)
+        let view = try XCTUnwrap(action.view as? AddEditItemView)
+        XCTAssertEqual(view.store.state.type, .login)
+        XCTAssertFalse(view.store.state.loginState.isTOTPAvailable)
+    }
+
+    /// `navigate(to:)` with `.addItem` with new cipher options.
+    @MainActor
+    func test_navigateTo_addItem_withNewCipherOptions() throws {
+        let task = Task {
+            let newCipherOptions = NewCipherOptions(
+                name: "Bitwarden",
+                password: "SECRET",
+                uri: "bitwarden.com",
+                username: "user@bitwarden.com",
+                totpKey: .otpAuthUriKeyComplete,
+            )
+            subject.navigate(
+                to: .addItem(
+                    newCipherOptions: newCipherOptions,
+                    type: .login,
+                ),
+            )
+        }
+        waitFor(!stackNavigator.actions.isEmpty)
+        task.cancel()
+
+        let action = try XCTUnwrap(stackNavigator.actions.last)
+        XCTAssertEqual(action.type, .replaced)
+
+        let view = try XCTUnwrap(action.view as? AddEditItemView)
+        XCTAssertEqual(view.store.state.name, "Bitwarden")
+        XCTAssertEqual(view.store.state.type, .login)
+        XCTAssertEqual(view.store.state.loginState.password, "SECRET")
+        XCTAssertEqual(view.store.state.loginState.username, "user@bitwarden.com")
+        XCTAssertEqual(view.store.state.loginState.uris.map(\.uri), ["bitwarden.com"])
+        XCTAssertEqual(view.store.state.loginState.totpState, LoginTOTPState(.otpAuthUriKeyComplete))
+    }
+
+    /// `navigate(to:)` with `.addItem` without a group pushes the add item view onto the stack navigator.
+    @MainActor
+    func test_navigateTo_addItem_withoutGroup() throws {
+        let task = Task {
+            subject.navigate(to: .addItem(type: .login))
+        }
+        waitFor(!stackNavigator.actions.isEmpty)
+        task.cancel()
+
+        let action = try XCTUnwrap(stackNavigator.actions.last)
+        XCTAssertEqual(action.type, .replaced)
+
+        let view = try XCTUnwrap(action.view as? AddEditItemView)
+        XCTAssertEqual(view.store.state.type, .login)
+    }
+
+    /// `navigate(to:)` with `.addItem` with a group pushes the add item view onto the stack navigator.
+    @MainActor
+    func test_navigateTo_addItem_withGroup() throws {
+        let task = Task {
+            subject.navigate(to: .addItem(group: .card, type: .card))
+        }
+        waitFor(!stackNavigator.actions.isEmpty)
+        task.cancel()
+
+        let action = try XCTUnwrap(stackNavigator.actions.last)
+        XCTAssertEqual(action.type, .replaced)
+        XCTAssertTrue(action.view is AddEditItemView)
+
+        let view = try XCTUnwrap(action.view as? AddEditItemView)
+        XCTAssertEqual(view.store.state.type, .card)
+    }
+
+    /// `navigate(to:)` with `.addItem` with a group collection pushes the add item view onto the
+    /// stack navigator and sets the collection and organization's ID on the new item.
+    @MainActor
+    func test_navigateTo_addItem_withGroupCollection() throws {
+        subject.navigate(
+            to: .addItem(
+                group: .collection(id: "12345", name: "Test", organizationId: "org-12345"),
+                type: .login,
+            ),
+        )
+
+        let action = try XCTUnwrap(stackNavigator.actions.last)
+        XCTAssertEqual(action.type, .replaced)
+        XCTAssertTrue(action.view is AddEditItemView)
+
+        let view = try XCTUnwrap(action.view as? AddEditItemView)
+        XCTAssertEqual(view.store.state.type, .login)
+        XCTAssertEqual(view.store.state.collectionIds, ["12345"])
+        XCTAssertEqual(view.store.state.organizationId, "org-12345")
+    }
+
+    /// `navigate(to:)` with `.addItem` with a group folder pushes the add item view onto the stack
+    /// navigator and sets the folder's ID on the new item.
+    @MainActor
+    func test_navigateTo_addItem_withGroupFolder() throws {
+        subject.navigate(
+            to: .addItem(
+                group: .folder(id: "12345", name: "Test"),
+                type: .login,
+            ),
+        )
+
+        let action = try XCTUnwrap(stackNavigator.actions.last)
+        XCTAssertEqual(action.type, .replaced)
+        XCTAssertTrue(action.view is AddEditItemView)
+
+        let view = try XCTUnwrap(action.view as? AddEditItemView)
+        XCTAssertEqual(view.store.state.type, .login)
+        XCTAssertEqual(view.store.state.folderId, "12345")
+    }
+
+    /// `navigate(to:)` with `.addItem` with an organization ID, pushes the add item view onto the
+    /// stack navigator and sets organization's ID on the new item.
+    @MainActor
+    func test_navigateTo_addItem_withOrganizationId() throws {
+        subject.navigate(
+            to: .addItem(
+                organizationId: "org-12345",
+                type: .login,
+            ),
+        )
+
+        let action = try XCTUnwrap(stackNavigator.actions.last)
+        XCTAssertEqual(action.type, .replaced)
+        XCTAssertTrue(action.view is AddEditItemView)
+
+        let view = try XCTUnwrap(action.view as? AddEditItemView)
+        XCTAssertEqual(view.store.state.type, .login)
+        XCTAssertEqual(view.store.state.organizationId, "org-12345")
+    }
+
+    /// `navigate(to:)` with `.addItem` with a cipher type, pushes the add item view onto the
+    /// stack navigator and sets the item's type.
+    @MainActor
+    func test_navigateTo_addItem_withType() throws {
+        subject.navigate(to: .addItem(type: .identity))
+
+        let action = try XCTUnwrap(stackNavigator.actions.last)
+        XCTAssertEqual(action.type, .replaced)
+        XCTAssertTrue(action.view is AddEditItemView)
+
+        let view = try XCTUnwrap(action.view as? AddEditItemView)
+        XCTAssertEqual(view.store.state.type, .identity)
+    }
+
+    /// `navigate(to:)` with `.cloneItem()` triggers the show clone item flow.
+    @MainActor
+    func test_navigateTo_cloneItem_nonPremium() throws {
+        subject.navigate(to: .cloneItem(cipher: .loginFixture(), hasPremium: false), context: subject)
+
+        let action = try XCTUnwrap(stackNavigator.actions.last)
+        XCTAssertEqual(action.type, .replaced)
+        let view = try XCTUnwrap(action.view as? AddEditItemView)
+        XCTAssertFalse(view.store.state.loginState.isTOTPAvailable)
+    }
+
+    /// `navigate(to:)` with `.editCollections()` triggers the edit collections flow.
+    @MainActor
+    func test_navigateTo_editCollections() throws {
+        subject.navigate(to: .editCollections(.fixture()))
+
+        let action = try XCTUnwrap(stackNavigator.actions.last)
+        XCTAssertEqual(action.type, .presented)
+        XCTAssertTrue(action.view is EditCollectionsView)
+        XCTAssertEqual(action.embedInNavigationController, true)
+    }
+
+    /// `navigate(to:)` with `.attachments()` navigates to the attachments view..
+    @MainActor
+    func test_navigateTo_attachments() throws {
+        subject.navigate(to: .attachments(.fixture()))
+
+        let action = try XCTUnwrap(stackNavigator.actions.last)
+        XCTAssertEqual(action.type, .presented)
+        XCTAssertTrue(action.view is AttachmentsView)
+        XCTAssertEqual(action.embedInNavigationController, true)
+    }
+
+    /// `navigate(to:)` with `.generator`, `.password`, and a delegate presents the generator
+    /// screen.
+    @MainActor
+    func test_navigateTo_generator_withPassword_withDelegate() throws {
+        let delegate = MockGeneratorCoordinatorDelegate()
+        subject.navigate(to: .generator(.password), context: delegate)
+
+        let action = try XCTUnwrap(stackNavigator.actions.last)
+        XCTAssertEqual(action.type, .presented)
+        XCTAssertTrue(action.view is UINavigationController)
+
+        XCTAssertTrue(module.generatorCoordinator.isStarted)
+        XCTAssertEqual(module.generatorCoordinator.routes.last, .generator(staticType: .password))
+    }
+
+    /// `navigate(to:)` with `.dismiss` dismisses the top most view presented by the stack
+    /// navigator.
+    @MainActor
+    func test_navigate_dismiss_noAction() throws {
+        subject.navigate(to: .dismiss())
+        let action = try XCTUnwrap(stackNavigator.actions.last)
+        XCTAssertEqual(action.type, .dismissedWithCompletionHandler)
+    }
+
+    /// `navigate(to:)` with `.dismiss` dismisses the top most view presented by the stack
+    /// navigator.
+    @MainActor
+    func test_navigate_dismiss_withAction() throws {
+        var didRun = false
+        subject.navigate(to: .dismiss(DismissAction(action: { didRun = true })))
+        let lastAction = try XCTUnwrap(stackNavigator.actions.last)
+        XCTAssertEqual(lastAction.type, .dismissedWithCompletionHandler)
+        XCTAssertTrue(didRun)
+    }
+
+    /// `navigate(to:)` with `.editItem()` with a malformed cipher fails to trigger the show edit flow.
+    @MainActor
+    func test_navigateTo_editItem_newCipher() throws {
+        subject.navigate(to: .editItem(.fixture(id: nil), false), context: nil)
+
+        XCTAssertNil(stackNavigator.actions.last)
+    }
+
+    /// `navigate(to:)` with `.editItem()` with an existing cipher triggers the show edit flow.
+    @MainActor
+    func test_navigateTo_editItem_existingCipher_withoutContext() throws {
+        subject.navigate(to: .editItem(.loginFixture(), false), context: nil)
+
+        let action = try XCTUnwrap(stackNavigator.actions.last)
+        XCTAssertEqual(action.type, .replaced)
+        XCTAssertTrue(action.view is AddEditItemView)
+    }
+
+    /// `navigate(to:)` with `.editItem()` with a non empty stack presents a new vault item coordinator.
+    @MainActor
+    func test_navigateTo_editItem_presentsCoordinator() throws {
+        stackNavigator.isEmpty = false
+
+        subject.navigate(to: .editItem(.loginFixture(), false), context: nil)
+
+        let action = try XCTUnwrap(stackNavigator.actions.last)
+        XCTAssertEqual(action.type, .presented)
+        XCTAssertTrue(action.view is UINavigationController)
+        XCTAssertEqual(module.vaultItemCoordinator.routes, [.editItem(.loginFixture(), false)])
+    }
+
+    /// `navigate(to:)` with `.editItem()` with an existing cipher triggers the show edit flow.
+    @MainActor
+    func test_navigateTo_editItem_existingCipher_withContext() throws {
+        subject.navigate(to: .editItem(.loginFixture(), false), context: subject)
+
+        let action = try XCTUnwrap(stackNavigator.actions.last)
+        XCTAssertEqual(action.type, .replaced)
+        XCTAssertTrue(action.view is AddEditItemView)
+    }
+
+    /// `navigate(to:)` with `.editItem()` with an existing cipher triggers the show edit flow.
+    @MainActor
+    func test_navigateTo_editItem_existingCipher_nonPremium() throws {
+        subject.navigate(to: .editItem(.loginFixture(), false), context: subject)
+
+        let action = try XCTUnwrap(stackNavigator.actions.last)
+        XCTAssertEqual(action.type, .replaced)
+        let view = try XCTUnwrap(action.view as? AddEditItemView)
+        XCTAssertFalse(view.store.state.loginState.isTOTPAvailable)
+    }
+
+    /// `navigate(to:)` with `.editItem()` with an existing cipher triggers the show edit flow.
+    @MainActor
+    func test_navigateTo_editItem_existingCipher_unknownPremium() throws {
+        subject.navigate(to: .editItem(.loginFixture(), false), context: subject)
+
+        let action = try XCTUnwrap(stackNavigator.actions.last)
+        XCTAssertEqual(action.type, .replaced)
+        let view = try XCTUnwrap(action.view as? AddEditItemView)
+        XCTAssertFalse(view.store.state.loginState.isTOTPAvailable)
+    }
+
+    /// `navigate(to:)` with `.fileSelection` and without a file selection delegate does not present the
+    /// file selection screen.
+    @MainActor
+    func test_navigateTo_fileSelection_withoutDelegate() throws {
+        subject.navigate(to: .fileSelection(.camera), context: nil)
+        XCTAssertNil(stackNavigator.actions.last)
+    }
+
+    /// `navigate(to:)` with `.fileSelection` and with a file selection delegate presents the file
+    /// selection screen.
+    @MainActor
+    func test_navigateTo_fileSelection_withDelegate() throws {
+        let delegate = MockFileSelectionDelegate()
+        subject.navigate(to: .fileSelection(.camera), context: delegate)
+
+        XCTAssertEqual(module.fileSelectionCoordinator.routes.last, .camera)
+        XCTAssertTrue(module.fileSelectionCoordinator.isStarted)
+        XCTAssertIdentical(module.fileSelectionDelegate, delegate)
+    }
+
+    /// `navigate(to:)` with `.generator`, `.password`, and without a delegate does not present the
+    /// generator screen.
+    @MainActor
+    func test_navigateTo_generator_withPassword_withoutDelegate() throws {
+        subject.navigate(to: .generator(.password), context: nil)
+
+        XCTAssertNil(stackNavigator.actions.last)
+    }
+
+    /// `navigate(to:)` with `.generator`, `.username`, and a delegate presents the generator
+    /// screen.
+    @MainActor
+    func test_navigateTo_generator_withUsername_withDelegate() throws {
+        let delegate = MockGeneratorCoordinatorDelegate()
+        subject.navigate(to: .generator(.username), context: delegate)
+
+        let action = try XCTUnwrap(stackNavigator.actions.last)
+        XCTAssertEqual(action.type, .presented)
+        XCTAssertTrue(action.view is UINavigationController)
+
+        XCTAssertTrue(module.generatorCoordinator.isStarted)
+        XCTAssertEqual(module.generatorCoordinator.routes.last, .generator(staticType: .username))
+    }
+
+    /// `navigate(to:)` with `.generator`, `.username`, `emailWebsite` and a delegate presents the
+    /// generator screen.
+    @MainActor
+    func test_navigateTo_generator_withUsername_withDelegate_withEmailWebsite() throws {
+        let delegate = MockGeneratorCoordinatorDelegate()
+        subject.navigate(to: .generator(.username, emailWebsite: "bitwarden.com"), context: delegate)
+
+        let action = try XCTUnwrap(stackNavigator.actions.last)
+        XCTAssertEqual(action.type, .presented)
+        XCTAssertTrue(action.view is UINavigationController)
+
+        XCTAssertTrue(module.generatorCoordinator.isStarted)
+        XCTAssertEqual(
+            module.generatorCoordinator.routes.last,
+            .generator(staticType: .username, emailWebsite: "bitwarden.com"),
+        )
+    }
+
+    /// `navigate(to:)` with `.generator`, `.username`, and without a delegate does not present the
+    /// generator screen.
+    @MainActor
+    func test_navigateTo_generator_withUsername_withoutDelegate() throws {
+        subject.navigate(to: .generator(.username), context: nil)
+
+        XCTAssertNil(stackNavigator.actions.last)
+    }
+
+    /// `navigate(to:)` with `.moveToOrganization()` triggers the move to organization flow.
+    @MainActor
+    func test_navigateTo_moveToOrganization() throws {
+        subject.navigate(to: .moveToOrganization(.fixture()))
+
+        let action = try XCTUnwrap(stackNavigator.actions.last)
+        XCTAssertEqual(action.type, .presented)
+        XCTAssertTrue(action.view is MoveToOrganizationView)
+        XCTAssertEqual(action.embedInNavigationController, true)
+    }
+
+    /// `navigate(to:)` with `.passwordHistory` presents the password history view.
+    @MainActor
+    func test_navigateTo_passwordHistory() throws {
+        subject.navigate(to: .passwordHistory([.fixture()]))
+
+        let action = try XCTUnwrap(stackNavigator.actions.last)
+        XCTAssertEqual(action.type, .presented)
+        XCTAssertTrue(action.view is UINavigationController)
+
+        XCTAssertTrue(module.passwordHistoryCoordinator.isStarted)
+        XCTAssertEqual(module.passwordHistoryCoordinator.routes.last, .passwordHistoryList(.item([.fixture()])))
+    }
+
+    /// `navigate(to:)` with `.premiumUpgrade` presents the billing coordinator at the Premium upgrade route.
+    @MainActor
+    func test_navigateTo_premiumUpgrade() throws {
+        subject.navigate(to: .premiumUpgrade)
+
+        let action = try XCTUnwrap(stackNavigator.actions.last)
+        XCTAssertEqual(action.type, .presented)
+        XCTAssertEqual(module.billingCoordinator.routes, [.premiumUpgrade])
+    }
+
+    /// `navigate(to:)` with `.setupTotpCamera` with context without conformance fails to present.
+    @MainActor
+    func test_navigateTo_setupTotpCamera_noConformance() async throws {
+        cameraService.startResult = .success(AVCaptureSession())
+        cameraService.cameraAuthorizationStatus = .authorized
+        await subject.handleEvent(.showScanCode, context: MockProcessor<Any, Any, Any>(state: ()))
+        XCTAssertTrue(stackNavigator.actions.isEmpty)
+    }
+
+    /// `navigate(to:)` with `.setupTotpCamera` without context fails to present.
+    @MainActor
+    func test_navigateTo_setupTotpCamera_noContext() async throws {
+        cameraService.startResult = .success(AVCaptureSession())
+        cameraService.cameraAuthorizationStatus = .authorized
+        await subject.handleEvent(.showScanCode, context: nil)
+        XCTAssertTrue(stackNavigator.actions.isEmpty)
+    }
+
+    /// `navigate(to:)` with `.setupTotpCamera` presents the camera totp setup screen.
+    @MainActor
+    func test_navigateTo_setupTotpCamera_success() throws {
+        let mockContext = MockScanDelegateProcessor(state: ())
+        cameraService.startResult = .success(AVCaptureSession())
+        cameraService.cameraAuthorizationStatus = .authorized
+        cameraService.deviceHasCamera = true
+        let task = Task {
+            await subject.handleEvent(.showScanCode, context: mockContext)
+        }
+
+        waitFor(!stackNavigator.actions.isEmpty)
+        task.cancel()
+
+        let action = try XCTUnwrap(stackNavigator.actions.last)
+        XCTAssertEqual(action.type, .presented)
+        XCTAssertTrue(action.view is UIViewController)
+    }
+
+    /// `navigate(to:)` with `.setupTotpManual` with context without conformance fails to present.
+    @MainActor
+    func test_navigateTo_setupTotpManual_noConformance() throws {
+        cameraService.startResult = .success(AVCaptureSession())
+        cameraService.cameraAuthorizationStatus = .authorized
+        subject.navigate(to: .setupTotpManual, context: MockProcessor<Any, Any, Any>(state: ()))
+        XCTAssertTrue(stackNavigator.actions.isEmpty)
+    }
+
+    /// `navigate(to:)` with `.setupTotpManual` without context fails to present.
+    @MainActor
+    func test_navigateTo_setupTotpManual_noContext() throws {
+        cameraService.startResult = .success(AVCaptureSession())
+        cameraService.cameraAuthorizationStatus = .authorized
+        subject.navigate(to: .setupTotpManual, context: nil)
+        XCTAssertTrue(stackNavigator.actions.isEmpty)
+    }
+
+    /// `navigate(to:)` with `.setupTotpManual` presents the manual totp setup screen.
+    @MainActor
+    func test_navigateTo_setupTotpManual_success() throws {
+        let mockContext = MockScanDelegateProcessor(state: ())
+        let task = Task {
+            subject.navigate(to: .setupTotpManual, context: mockContext)
+        }
+
+        waitFor(!stackNavigator.actions.isEmpty)
+        task.cancel()
+
+        let action = try XCTUnwrap(stackNavigator.actions.last)
+        XCTAssertEqual(action.type, .presented)
+        XCTAssertTrue(action.view is UIViewController)
+    }
+
+    /// `.navigate(to:)` with `.viewItem` presents the view item screen.
+    @MainActor
+    func test_navigateTo_viewItem() throws {
+        subject.navigate(to: .viewItem(id: "id"))
+
+        let action = try XCTUnwrap(stackNavigator.actions.last)
+        XCTAssertEqual(action.type, .replaced)
+        XCTAssertTrue(action.view is ViewItemView)
+    }
+
+    /// `navigate(to:)` with `.migrateToMyItems` replaces the view with the migrate to my items screen.
+    @MainActor
+    func test_navigateTo_migrateToMyItems() throws {
+        subject.navigate(to: .migrateToMyItems(organizationId: "org-123"))
+
+        let action = try XCTUnwrap(stackNavigator.actions.last)
+        XCTAssertEqual(action.type, .replaced)
+        XCTAssertTrue(action.view is MigrateToMyItemsView)
+    }
+
+    /// `navigate(to:)` with `.migrateToMyItems` and a delegate sets up the processor with the delegate.
+    @MainActor
+    func test_navigateTo_migrateToMyItems_withDelegate() throws {
+        let delegate = MockMigrateToMyItemsProcessorDelegate()
+        subject.navigate(to: .migrateToMyItems(organizationId: "org-456"), context: delegate)
+
+        let action = try XCTUnwrap(stackNavigator.actions.last)
+        XCTAssertEqual(action.type, .replaced)
+        XCTAssertTrue(action.view is MigrateToMyItemsView)
+    }
+
+    /// `start()` has no effect.
+    @MainActor
+    func test_start() {
+        subject.start()
+
+        XCTAssertTrue(stackNavigator.actions.isEmpty)
+    }
+}
+
+/// A MockProcessor with AuthenticatorKeyCaptureDelegate conformance.
+///
+class MockScanDelegateProcessor: MockProcessor<Any, Any, Any>, AuthenticatorKeyCaptureDelegate {
+    /// A property to capture a `AuthenticatorKeyCaptureCoordinator` call value.
+    var capturedCoordinator: AnyCoordinator<AuthenticatorKeyCaptureRoute, AuthenticatorKeyCaptureEvent>?
+
+    /// A property to capture a `didCompleteCapture` call value.
+    var capturedScan: String?
+
+    /// A flag to capture a `didCancel` call.
+    var didCancel: Bool = false
+
+    /// A flag to capture a `showCameraScan` call.
+    var didRequestCamera: Bool = false
+
+    /// A flag to capture a `showManualEntry` call.
+    var didRequestManual: Bool = false
+
+    func didCompleteCapture(
+        _ captureCoordinator: AnyCoordinator<AuthenticatorKeyCaptureRoute, AuthenticatorKeyCaptureEvent>,
+        with value: String,
+    ) {
+        capturedCoordinator = captureCoordinator
+        capturedScan = value
+    }
+
+    func showCameraScan(
+        _ captureCoordinator: AnyCoordinator<AuthenticatorKeyCaptureRoute, AuthenticatorKeyCaptureEvent>,
+    ) {
+        didRequestCamera = true
+        capturedCoordinator = captureCoordinator
+    }
+
+    func showManualEntry(
+        _ captureCoordinator: AnyCoordinator<AuthenticatorKeyCaptureRoute, AuthenticatorKeyCaptureEvent>,
+    ) {
+        didRequestManual = true
+        capturedCoordinator = captureCoordinator
+    }
+
+    func didCancelScan() {
+        didCancel = true
+    }
+}

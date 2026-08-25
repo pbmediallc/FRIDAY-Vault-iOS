@@ -1,0 +1,141 @@
+import BitwardenKit
+import Foundation
+import XCTest
+
+@testable import BitwardenShared
+
+final class ServerConfigTests: BitwardenTestCase {
+    // MARK: Tests
+
+    /// `init(date:responseModel:)` maps `communication` to `ServerCommunicationSettings` when present.
+    func test_init_withCommunicationSettings_ssoCookieVendor() {
+        let bootstrap = CommunicationBootstrapSettingsResponseModel(
+            type: "ssoCookieVendor",
+            idpLoginUrl: "https://idp.example.com/login",
+            cookieName: "bwauth",
+            cookieDomain: "example.com",
+        )
+        let model = ConfigResponseModel(
+            communication: CommunicationSettingsResponseModel(bootstrap: bootstrap),
+            environment: nil,
+            featureStates: [:],
+            gitHash: "abc",
+            server: nil,
+            version: "2024.2.0",
+        )
+
+        let subject = ServerConfig(date: Date(), responseModel: model)
+
+        XCTAssertNotNil(subject.communication)
+        XCTAssertEqual(subject.communication?.bootstrap.type, "ssoCookieVendor")
+        XCTAssertEqual(subject.communication?.bootstrap.idpLoginUrl, "https://idp.example.com/login")
+        XCTAssertEqual(subject.communication?.bootstrap.cookieName, "bwauth")
+        XCTAssertEqual(subject.communication?.bootstrap.cookieDomain, "example.com")
+    }
+
+    /// `init(date:responseModel:)` maps `communication` for a `direct` bootstrap type.
+    func test_init_withCommunicationSettings_direct() {
+        let bootstrap = CommunicationBootstrapSettingsResponseModel(
+            type: "direct",
+            idpLoginUrl: nil,
+            cookieName: nil,
+            cookieDomain: nil,
+        )
+        let model = ConfigResponseModel(
+            communication: CommunicationSettingsResponseModel(bootstrap: bootstrap),
+            environment: nil,
+            featureStates: [:],
+            gitHash: "abc",
+            server: nil,
+            version: "2024.2.0",
+        )
+
+        let subject = ServerConfig(date: Date(), responseModel: model)
+
+        XCTAssertEqual(subject.communication?.bootstrap.type, "direct")
+        XCTAssertNil(subject.communication?.bootstrap.idpLoginUrl)
+        XCTAssertNil(subject.communication?.bootstrap.cookieName)
+        XCTAssertNil(subject.communication?.bootstrap.cookieDomain)
+    }
+
+    /// `init(date:responseModel:)` sets `communication` to `nil` when the response model omits it.
+    func test_init_withoutCommunicationSettings() {
+        let model = ConfigResponseModel(
+            communication: nil,
+            environment: nil,
+            featureStates: [:],
+            gitHash: "abc",
+            server: nil,
+            version: "2024.2.0",
+        )
+
+        let subject = ServerConfig(date: Date(), responseModel: model)
+
+        XCTAssertNil(subject.communication)
+    }
+
+    /// `ServerCommunicationBootstrapSettings` initialised from a response model maps all fields.
+    func test_communicationBootstrapSettings_init_fromResponseModel() {
+        let responseModel = CommunicationBootstrapSettingsResponseModel(
+            type: "ssoCookieVendor",
+            idpLoginUrl: "https://idp.example.com",
+            cookieName: "session",
+            cookieDomain: "example.com",
+        )
+        let subject = ServerCommunicationBootstrapSettings(responseModel: responseModel)
+
+        XCTAssertEqual(subject.type, "ssoCookieVendor")
+        XCTAssertEqual(subject.idpLoginUrl, "https://idp.example.com")
+        XCTAssertEqual(subject.cookieName, "session")
+        XCTAssertEqual(subject.cookieDomain, "example.com")
+    }
+
+    /// `ServerCommunicationSettings` with equal bootstraps compare as equal.
+    func test_communicationSettings_equatable() {
+        let bootstrapA = ServerCommunicationBootstrapSettings(
+            type: "direct",
+            idpLoginUrl: nil,
+            cookieName: nil,
+            cookieDomain: nil,
+        )
+        let bootstrapB = ServerCommunicationBootstrapSettings(
+            type: "ssoCookieVendor",
+            idpLoginUrl: "https://idp.example.com",
+            cookieName: "c",
+            cookieDomain: "example.com",
+        )
+
+        XCTAssertEqual(
+            ServerCommunicationSettings(bootstrap: bootstrapA),
+            ServerCommunicationSettings(bootstrap: bootstrapA),
+        )
+        XCTAssertNotEqual(
+            ServerCommunicationSettings(bootstrap: bootstrapA),
+            ServerCommunicationSettings(bootstrap: bootstrapB),
+        )
+    }
+
+    /// `init(date:responseModel:)` maps `fillAssistRules` from the environment response model.
+    func test_init_environmentServerConfig_fillAssistRules() {
+        let model = ConfigResponseModel(
+            communication: nil,
+            environment: EnvironmentServerConfigResponseModel(
+                api: nil,
+                cloudRegion: nil,
+                fillAssistRules: "https://custom.example.com/fill-assist",
+                identity: nil,
+                notifications: nil,
+                sso: nil,
+                vault: nil,
+            ),
+            featureStates: [:],
+            gitHash: nil,
+            server: nil,
+            version: "2025.1.0",
+        )
+
+        let subject = ServerConfig(date: Date(), responseModel: model)
+
+        XCTAssertEqual(subject.environment?.fillAssistRules, "https://custom.example.com/fill-assist")
+    }
+}

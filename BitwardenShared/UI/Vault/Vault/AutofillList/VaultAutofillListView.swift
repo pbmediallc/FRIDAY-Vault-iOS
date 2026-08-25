@@ -1,0 +1,607 @@
+import BitwardenKit
+import BitwardenResources
+import BitwardenSdk
+import SwiftUI
+
+// MARK: - VaultAutofillListView
+
+/// A view that allows the user see a list of their vault item for autofill.
+///
+struct VaultAutofillListView: View {
+    // MARK: Private types
+
+    /// Which text field in `autofillText` mode currently owns focus.
+    private enum FocusableField: Hashable {
+        case anchor
+        case search
+    }
+
+    // MARK: Properties
+
+    /// The GroupSearchDelegate used to bridge UIKit to SwiftUI
+    var searchHandler: VaultAutofillSearchHandler?
+
+    /// The `Store` for this view.
+    @ObservedObject var store: Store<VaultAutofillListState, VaultAutofillListAction, VaultAutofillListEffect>
+
+    /// The `TimeProvider` used to calculate TOTP expiration.
+    var timeProvider: any TimeProvider
+
+    // MARK: Private properties
+
+    /// PM-28227 WORKAROUND:  Which field owns focus in `autofillText` mode. Keeping both transitions inside SwiftUI's
+    /// focus system ensures `fromBecomeFirstResponder:0` / `delayEndInputSession:NO` on every
+    /// handoff, preventing the 5-second RTI timer that fires when UIKit's explicit
+    /// `becomeFirstResponder()` (`fromBecomeFirstResponder:1`) is used instead.
+    @FocusState private var focusedField: FocusableField?
+
+    // MARK: View
+
+    var body: some View {
+        VStack(spacing: 0) {
+            if store.state.isAutofillingTextToInsertList {
+                inlineSearchBarView
+                // Zero-size anchor that holds the RTI session when the inline search bar is idle.
+                // Using @FocusState (fromBecomeFirstResponder:0) avoids the 5-second timer that
+                // UIKit's explicit becomeFirstResponder() (fromBecomeFirstResponder:1) would start.
+                TextField("", text: .constant(""))
+                    .focused($focusedField, equals: .anchor)
+                    .frame(width: 0, height: 0)
+                    .allowsHitTesting(false)
+                    .accessibilityHidden(true)
+            }
+            ZStack {
+                VaultAutofillListSearchableView(store: store, timeProvider: timeProvider)
+                profileSwitcher
+            }
+        }
+        .navigationBar(title: store.state.group?.navigationTitle ?? Localizations.items, titleDisplayMode: .inline)
+        .if(store.state.excludedCredentialIdFound == nil && !store.state.isAutofillingTextToInsertList) { view in
+            view.searchable(
+                text: store.binding(
+                    get: \.searchText,
+                    send: VaultAutofillListAction.searchTextChanged,
+                ),
+                placement: .navigationBarDrawer(displayMode: .always),
+                prompt: Localizations.search,
+            )
+        }
+        .toolbar {
+            cancelToolbarItem(hidden: store.state.group != nil) {
+                store.send(.cancelTapped)
+            }
+
+            ToolbarItem(placement: .navigationBarLeading) {
+                ProfileSwitcherToolbarView(
+                    store: store.child(
+                        state: \.profileSwitcherState,
+                        mapAction: VaultAutofillListAction.profileSwitcher,
+                        mapEffect: VaultAutofillListEffect.profileSwitcher,
+                    ),
+                )
+            }
+        }
+        .onAppear {
+            if store.state.isAutofillingTextToInsertList {
+                focusedField = .anchor
+            }
+        }
+        .onChange(of: focusedField) { field in
+            store.send(.searchStateChanged(isSearching: field == .search))
+        }
+    }
+
+    // MARK: Private views
+
+    /// An inline search bar shown instead of `.searchable` in `autofillText` mode.
+    ///
+    /// **PM-28227 workaround.** In `autofillText` mode the extension is presented as a keyboard
+    /// panel (InputUI) backed by a Remote Text Input (RTI) session. If any text field becomes first
+    /// responder via UIKit's explicit `becomeFirstResponder()`, the RTI system marks the session
+    /// with `delayEndInputSession:YES` (`fromBecomeFirstResponder:1`) and starts a ~5-second
+    /// countdown. When the timer fires, `endRemoteTextInputSessionWithID` tears down the keyboard
+    /// panel and the extension is dismissed.
+    ///
+    /// Using `.searchable` triggers `UISearchController`, which eventually calls explicit
+    /// `becomeFirstResponder()` on resign — starting that timer. This custom bar keeps every focus
+    /// transition inside SwiftUI's `@FocusState` machinery (`fromBecomeFirstResponder:0`,
+    /// `delayEndInputSession:NO`), so the RTI session is never put on a countdown regardless of
+    /// how many times the user opens and cancels search.
+    @ViewBuilder private var inlineSearchBarView: some View {
+        HStack(spacing: 8) {
+            HStack(spacing: 6) {
+                Image(systemName: "magnifyingglass")
+                    .foregroundStyle(FridayVaultDesign.secondary)
+                    .font(.system(size: 15)) // swiftlint:disable:this style_guide_font
+                TextField(
+                    Localizations.search,
+                    text: store.binding(
+                        get: \.searchText,
+                        send: VaultAutofillListAction.searchTextChanged,
+                    ),
+                )
+                .focused($focusedField, equals: .search)
+                .autocorrectionDisabled()
+                .textInputAutocapitalization(.never)
+                if !store.state.searchText.isEmpty {
+                    Button {
+                        store.send(.searchTextChanged(""))
+                    } label: {
+                        Image(systemName: "xmark.circle.fill")
+                            .foregroundStyle(FridayVaultDesign.secondary)
+                            .font(.system(size: 15)) // swiftlint:disable:this style_guide_font
+                    }
+                }
+            }
+            .padding(.horizontal, 8)
+            .padding(.vertical, 7)
+            .background(FridayVaultDesign.elevated)
+            .clipShape(RoundedRectangle(cornerRadius: FridayVaultDesign.cornerCard))
+            .overlay {
+                RoundedRectangle(cornerRadius: FridayVaultDesign.cornerCard)
+                    .stroke(
+                        focusedField == .search ? FridayVaultDesign.cyan : FridayVaultDesign.edge,
+                        lineWidth: 1,
+                    )
+            }
+
+            if focusedField == .search || !store.state.searchText.isEmpty {
+                Button(Localizations.cancel) {
+                    focusedField = .anchor
+                    store.send(.searchTextChanged(""))
+                }
+                .transition(.move(edge: .trailing).combined(with: .opacity))
+            }
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 8)
+        .animation(.default, value: focusedField)
+        .background(FridayVaultDesign.panel)
+    }
+
+    /// A view that displays the ability to add or switch between account profiles
+    @ViewBuilder private var profileSwitcher: some View {
+        ProfileSwitcherView(
+            store: store.child(
+                state: \.profileSwitcherState,
+                mapAction: VaultAutofillListAction.profileSwitcher,
+                mapEffect: VaultAutofillListEffect.profileSwitcher,
+            ),
+        )
+    }
+}
+
+// MARK: - VaultAutofillListSearchableView
+
+/// A view that that displays the content of `VaultAutofillListView`. This needs to be a separate
+/// view from `VaultAutofillListView` to enable the `isSearching` environment variable within this
+/// view.
+///
+private struct VaultAutofillListSearchableView: View {
+    // MARK: Properties
+
+    /// A flag indicating if the search bar is focused.
+    @Environment(\.isSearching) private var isSearching
+
+    /// The `Store` for this view.
+    @ObservedObject var store: Store<VaultAutofillListState, VaultAutofillListAction, VaultAutofillListEffect>
+
+    /// The `TimeProvider` used to calculate TOTP expiration.
+    var timeProvider: any TimeProvider
+
+    // MARK: Private properties
+
+    /// Tracks the long-running excluded-credential stream task so it can be cancelled when the id
+    /// changes or the view disappears, preventing concurrent tasks from racing on state.
+    @SwiftUI.State private var excludedCredentialTask: Task<Void, Never>?
+
+    // MARK: View
+
+    var body: some View {
+        contentView()
+            .onChange(of: isSearching) { newValue in
+                store.send(.searchStateChanged(isSearching: newValue))
+            }
+            .task {
+                await store.perform(.loadData)
+            }
+            .task {
+                await store.perform(.initFido2)
+            }
+            .task {
+                await store.perform(.streamAutofillItems)
+            }
+            .task {
+                await store.perform(.streamShowWebIcons)
+            }
+            .searchDebouncedTask(id: store.state.searchText) {
+                await store.perform(.search(store.state.searchText))
+            }
+            .onAppear {
+                restartExcludedCredentialTask()
+            }
+            .onChange(of: store.state.excludedCredentialIdFound) { _ in
+                restartExcludedCredentialTask()
+            }
+            .onDisappear {
+                excludedCredentialTask?.cancel()
+                excludedCredentialTask = nil
+            }
+            .toast(
+                store.binding(
+                    get: \.toast,
+                    send: VaultAutofillListAction.toastShown,
+                ),
+                additionalBottomPadding: FloatingActionButton.bottomOffsetPadding,
+            )
+    }
+
+    // MARK: Private methods
+
+    /// Cancels any running excluded-credential stream and starts a fresh one.
+    ///
+    /// Storing the `Task` and cancelling before restarting prevents concurrent tasks from racing on
+    /// `loadingState` when `excludedCredentialIdFound` changes between two non-nil values.
+    private func restartExcludedCredentialTask() {
+        excludedCredentialTask?.cancel()
+        excludedCredentialTask = Task { await store.perform(.excludedCredentialFoundChanged) }
+    }
+
+    // MARK: Private Views
+
+    /// A view for displaying a list of ciphers.
+    @ViewBuilder
+    private func cipherListView(_ sections: [VaultListSection]) -> some View {
+        Group {
+            if store.state.isAutofillingFido2List || store.state.isCreatingFido2Credential ||
+                store.state.isAutofillingTextToInsertList {
+                cipherCombinedListView(sections)
+            } else {
+                let items = sections.first?.items ?? []
+                cipherSimpleListView(items)
+            }
+        }
+        .padding(.bottom, FloatingActionButton.bottomOffsetPadding)
+        .scrollView(backgroundColor: .clear)
+    }
+
+    /// A view for displaying a list of sections with ciphers.
+    @ViewBuilder
+    private func cipherCombinedListView(_ sections: [VaultListSection]) -> some View {
+        VStack(spacing: 16) {
+            ForEach(sections) { section in
+                VaultListSectionView(
+                    section: section,
+                    showCount: !store.state.isCreatingFido2Credential,
+                ) { item in
+                    AsyncButton {
+                        await store.perform(.vaultItemTapped(item))
+                    } label: {
+                        vaultItemRow(for: item, isLastInSection: section.items.last == item)
+                    }
+                }
+            }
+        }
+    }
+
+    /// A view for displaying a list of ciphers without sections.
+    @ViewBuilder
+    private func cipherSimpleListView(_ items: [VaultListItem]) -> some View {
+        LazyVStack(spacing: 0) {
+            ForEach(items) { item in
+                AsyncButton {
+                    await store.perform(.vaultItemTapped(item))
+                } label: {
+                    vaultItemRow(for: item, isLastInSection: items.last == item)
+                }
+            }
+        }
+        .background(SharedAsset.Colors.backgroundSecondary.swiftUIColor)
+        .clipShape(RoundedRectangle(cornerRadius: 10))
+    }
+
+    /// A view that displays the empty vault interface.
+    @ViewBuilder
+    private func emptyView() -> some View {
+        IllustratedMessageView(
+            image: Asset.Images.Illustrations.items.swiftUIImage,
+            message: store.state.emptyViewMessage,
+        ) {
+            if store.state.isAutofillingTotpList
+                || store.state.isAutofillingTextToInsertList {
+                EmptyView()
+            } else {
+                Button {
+                    store.send(.addTapped(fromFAB: false))
+                } label: {
+                    Label {
+                        Text(store.state.emptyViewButtonText)
+                    } icon: {
+                        SharedAsset.Icons.plus16.swiftUIImage
+                            .imageStyle(.accessoryIcon16(
+                                color: SharedAsset.Colors.buttonFilledForeground.swiftUIColor,
+                                scaleWithFont: true,
+                            ))
+                    }
+                }
+                .buttonStyle(.primary(shouldFillWidth: false))
+            }
+        }
+        .scrollView(backgroundColor: .clear, centerContentVertically: true)
+    }
+
+    /// A view that displays an error message and a retry button.
+    ///
+    /// - Parameter errorMessage: The error message to display.
+    ///
+    @ViewBuilder
+    private func errorViewWithRetry(errorMessage: String) -> some View {
+        VStack(spacing: 24) {
+            Text(errorMessage)
+                .foregroundStyle(SharedAsset.Colors.textPrimary.swiftUIColor)
+                .styleGuide(.body)
+                .multilineTextAlignment(.center)
+                .padding(.horizontal, 12)
+
+            AsyncButton {
+                await store.perform(.loadData)
+            } label: {
+                Text(Localizations.tryAgain)
+            }
+            .buttonStyle(.primary(shouldFillWidth: false))
+        }
+        .scrollView(backgroundColor: .clear, centerContentVertically: true)
+    }
+
+    /// Creates a row in the list for the provided item.
+    ///
+    /// - Parameters:
+    ///   - item: The `VaultListItem` to use when creating the view.
+    ///   - isLastInSection: A flag indicating if this item is the last one in the section.
+    ///
+    @ViewBuilder
+    private func vaultItemRow(for item: VaultListItem, isLastInSection: Bool = false) -> some View {
+        VaultListItemRowView(
+            store: store.child(
+                state: { state in
+                    VaultListItemRowState(
+                        iconBaseURL: state.iconBaseURL,
+                        isFromExtension: true,
+                        item: item,
+                        hasDivider: !isLastInSection,
+                        showTotpCopyButton: false,
+                        showWebIcons: state.showWebIcons,
+                    )
+                },
+                mapAction: nil,
+                mapEffect: nil,
+            ),
+            timeProvider: timeProvider,
+        )
+    }
+
+    /// The content displayed in the view.
+    @ViewBuilder
+    private func contentView() -> some View {
+        ZStack {
+            let isSearching = isSearching
+                || !store.state.searchText.isEmpty
+                || !store.state.ciphersForSearch.isEmpty
+
+            LoadingView(state: store.state.loadingState) { sections in
+                if sections.isEmpty {
+                    emptyView()
+                } else {
+                    cipherListView(sections)
+                }
+            } errorView: { errorMessage in
+                errorViewWithRetry(errorMessage: errorMessage)
+            }
+            .overlay(alignment: .bottomTrailing) {
+                addItemFloatingActionButton(hidden: !store.state.showAddItemButton) {
+                    store.send(.addTapped(fromFAB: true))
+                }
+            }
+            .hidden(isSearching)
+
+            searchContentView()
+                .hidden(!isSearching)
+        }
+        .background {
+            FridayVaultBackdrop(motionEnabled: false)
+        }
+    }
+
+    /// A view for displaying the cipher search results.
+    @ViewBuilder
+    private func searchContentView() -> some View {
+        if store.state.showNoResults {
+            SearchNoResultsView()
+        } else {
+            cipherListView(store.state.ciphersForSearch)
+        }
+    }
+}
+
+// MARK: - Previews
+
+#if DEBUG
+#Preview("Loading") {
+    NavigationView {
+        VaultAutofillListView(
+            store: Store(processor: StateProcessor(state: VaultAutofillListState())),
+            timeProvider: PreviewTimeProvider(),
+        )
+    }
+}
+
+#Preview("Empty") {
+    NavigationView {
+        VaultAutofillListView(
+            store: Store(
+                processor: StateProcessor(
+                    state: VaultAutofillListState(loadingState: .data([])),
+                ),
+            ),
+            timeProvider: PreviewTimeProvider(),
+        )
+    }
+}
+
+#Preview("Error") {
+    NavigationView {
+        VaultAutofillListView(
+            store: Store(processor: StateProcessor(state: VaultAutofillListState(
+                loadingState: .error(
+                    errorMessage: Localizations.weAreUnableToProcessYourRequestPleaseTryAgainOrContactUs,
+                ),
+            ))),
+            timeProvider: PreviewTimeProvider(),
+        )
+    }
+}
+
+#Preview("Searching") {
+    NavigationView {
+        VaultAutofillListView(
+            store: Store(
+                processor: StateProcessor(
+                    state: VaultAutofillListState(
+                        ciphersForSearch: [
+                            VaultListSection(
+                                id: "Passwords",
+                                items: (1 ... 12).map { id in
+                                    .init(
+                                        cipherListView: .fixture(
+                                            id: String(id),
+                                            login: .fixture(),
+                                            name: "Bitwarden",
+                                        ),
+                                    )!
+                                },
+                                name: "Passwords",
+                            ),
+                        ],
+                        searchText: "Test",
+                    ),
+                ),
+            ),
+            timeProvider: PreviewTimeProvider(),
+        )
+    }
+}
+
+#Preview("Logins") {
+    NavigationView {
+        VaultAutofillListView(
+            store: Store(
+                processor: StateProcessor(
+                    state: VaultAutofillListState(
+                        loadingState: .data([
+                            VaultListSection(
+                                id: "Passwords",
+                                items: (1 ... 12).map { id in
+                                    .init(
+                                        cipherListView: .fixture(
+                                            id: String(id),
+                                            login: .fixture(),
+                                            name: "Bitwarden",
+                                        ),
+                                    )!
+                                },
+                                name: "Passwords",
+                            ),
+                        ]),
+                    ),
+                ),
+            ),
+            timeProvider: PreviewTimeProvider(),
+        )
+    }
+}
+
+#Preview("Combined Logins") {
+    NavigationView {
+        VaultAutofillListView(
+            store: Store(
+                processor: StateProcessor(
+                    state: VaultAutofillListState(
+                        isAutofillingFido2List: true,
+                        loadingState: .data([
+                            VaultListSection(
+                                id: "Passkeys for myApp.com",
+                                items: [
+                                    .init(cipherListView: .fixture(
+                                        id: "1",
+                                        login: .fixture(username: "user@bitwarden.com"),
+                                        name: "Apple",
+                                    ), fido2CredentialAutofillView: .fixture(
+                                        rpId: "apple.com",
+                                        userNameForUi: "user",
+                                    ))!,
+                                    .init(cipherListView: .fixture(
+                                        id: "4",
+                                        login: .fixture(
+                                            fido2Credentials: [.fixture()],
+                                            username: "user@bitwarden.com",
+                                        ),
+                                        name: "myApp.com",
+                                    ), fido2CredentialAutofillView: .fixture(
+                                        rpId: "myApp.com",
+                                        userNameForUi: "user",
+                                    ))!,
+                                    .init(cipherListView: .fixture(
+                                        id: "5",
+                                        login: .fixture(
+                                            fido2Credentials: [.fixture()],
+                                            username: "user@test.com",
+                                        ),
+                                        name: "Testing something really long to see how it looks",
+                                    ), fido2CredentialAutofillView: .fixture(
+                                        rpId: "someApp",
+                                        userNameForUi: "user",
+                                    ))!,
+                                ],
+                                name: "Passkeys for myApp.com",
+                            ),
+                            VaultListSection(
+                                id: "Passwords for myApp.com",
+                                items: [
+                                    .init(cipherListView: .fixture(
+                                        id: "1",
+                                        login: .fixture(
+                                            username: "user@bitwarden.com",
+                                        ),
+                                        name: "Apple",
+                                    ))!,
+                                    .init(cipherListView: .fixture(
+                                        id: "2",
+                                        login: .fixture(
+                                            username: "user@bitwarden.com",
+                                        ),
+                                        name: "Bitwarden",
+                                    ))!,
+                                    .init(cipherListView: .fixture(
+                                        id: "3",
+                                        name: "Company XYZ",
+                                    ))!,
+                                    .init(cipherListView: .fixture(
+                                        id: "4",
+                                        name: "Company XYZ",
+                                    ))!,
+                                    .init(cipherListView: .fixture(
+                                        id: "5",
+                                        name: "Company XYZ",
+                                    ))!,
+                                ],
+                                name: "Passwords for myApp.com",
+                            ),
+                        ]),
+                    ),
+                ),
+            ),
+            timeProvider: PreviewTimeProvider(),
+        )
+    }
+}
+#endif // swiftlint:disable:this file_length

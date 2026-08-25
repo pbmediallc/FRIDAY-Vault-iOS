@@ -1,0 +1,1210 @@
+import BitwardenKit
+import BitwardenResources
+@preconcurrency import BitwardenSdk
+import Foundation
+import UIKit
+
+// MARK: - CipherItemOperationDelegate
+
+/// An object that is notified when specific circumstances in the add/edit/delete item view have occurred.
+///
+@MainActor
+protocol CipherItemOperationDelegate: AnyObject {
+    /// Called when a new cipher item has been successfully added.
+    ///
+    /// - Returns: A boolean indicating whether the view should be dismissed. Defaults to `true`.
+    ///     If `false` is returned the delegate is responsible for dismissing the view.
+    ///
+    func itemAdded() -> Bool
+
+    /// Called when the cipher item has been successfully archived.
+    func itemArchived()
+
+    /// Called when the cipher item has been successfully permanently deleted.
+    func itemDeleted()
+
+    /// Called when the cipher item has been successfully restored.
+    func itemRestored()
+
+    /// Called when the cipher item has been successfully soft deleted.
+    func itemSoftDeleted()
+
+    /// Called when the cipher item has been successfully unarchived.
+    func itemUnarchived()
+
+    /// Called when a cipher item has been successfully updated.
+    ///
+    /// - Returns: A boolean indicating whether the view should be dismissed. Defaults to `true`.
+    ///     If `false` is returned the delegate is responsible for dismissing the view.
+    ///
+    func itemUpdated() -> Bool
+}
+
+extension CipherItemOperationDelegate {
+    func itemAdded() -> Bool { true }
+
+    func itemArchived() {}
+
+    func itemDeleted() {}
+
+    func itemRestored() {}
+
+    func itemSoftDeleted() {}
+
+    func itemUnarchived() {}
+
+    func itemUpdated() -> Bool { true }
+}
+
+// MARK: - AddEditItemProcessor
+
+/// The processor used to manage state and handle actions for the add item screen.
+final class AddEditItemProcessor: StateProcessor<// swiftlint:disable:this type_body_length
+    AddEditItemState,
+    AddEditItemAction,
+    AddEditItemEffect,
+>, Rehydratable {
+    // MARK: Types
+
+    typealias Services = HasAPIService
+        & HasAuthRepository
+        & HasBillingRepository
+        & HasBillingService
+        & HasCameraService
+        & HasCardTextParser
+        & HasConfigService
+        & HasEnvironmentService
+        & HasErrorReporter
+        & HasEventService
+        & HasFido2UserInterfaceHelper
+        & HasPasteboardService
+        & HasPolicyService
+        & HasRehydrationHelper
+        & HasReviewPromptService
+        & HasSettingsRepository
+        & HasStateService
+        & HasTOTPService
+        & HasVaultRepository
+
+    // MARK: Public properties
+
+    var rehydrationState: RehydrationState? {
+        guard let id = state.cipher.id else { return nil }
+        return RehydrationState(target: .editCipher(cipherId: id))
+    }
+
+    // MARK: Private Properties
+
+    /// A delegate used to communicate with the app extension.
+    private weak var appExtensionDelegate: AppExtensionDelegate?
+
+    /// The `Coordinator` that handles navigation.
+    private var coordinator: AnyCoordinator<VaultItemRoute, VaultItemEvent>
+
+    /// The delegate that is notified when delete cipher item have occurred.
+    private weak var delegate: CipherItemOperationDelegate?
+
+    /// The helper used to navigate to the Premium upgrade flow.
+    lazy var premiumUpgradeHelper: PremiumUpgradeHelper = DefaultPremiumUpgradeHelper(
+        services: services,
+        coordinator: coordinator,
+        setURL: { [weak self] url in self?.state.url = url },
+    )
+
+    /// The services required by this processor.
+    private let services: Services
+
+    /// The helper to execute vault item actions.
+    private let vaultItemActionHelper: VaultItemActionHelper
+
+    // MARK: Initialization
+
+    /// Creates a new `AddEditItemProcessor`.
+    ///
+    /// - Parameters:
+    ///   - appExtensionDelegate: A delegate used to communicate with the app extension.
+    ///   - coordinator: The `Coordinator` that handles navigation.
+    ///   - delegate: The delegate that is notified when add/edit/delete cipher item have occurred.
+    ///   - services: The services required by this processor.
+    ///   - state: The initial state for the processor.
+    ///   - vaultItemActionHelper: The helper to execute vault item actions.
+    ///
+    init(
+        appExtensionDelegate: AppExtensionDelegate?,
+        coordinator: AnyCoordinator<VaultItemRoute, VaultItemEvent>,
+        delegate: CipherItemOperationDelegate?,
+        services: Services,
+        state: AddEditItemState,
+        vaultItemActionHelper: VaultItemActionHelper,
+    ) {
+        self.appExtensionDelegate = appExtensionDelegate
+        self.coordinator = coordinator
+        self.delegate = delegate
+        self.services = services
+        self.vaultItemActionHelper = vaultItemActionHelper
+
+        super.init(state: state)
+
+        if !state.configuration.isAdding {
+            Task {
+                await self.services.rehydrationHelper.addRehydratableTarget(self)
+            }
+        }
+    }
+
+    // MARK: Methods
+
+    override func perform(_ effect: AddEditItemEffect) async {
+        switch effect {
+        case .appeared:
+            await loadFeatureFlags()
+            await showPasswordAutofillAlertIfNeeded()
+            await checkIfUserHasMasterPassword()
+            await checkLearnNewLoginActionCardEligibility()
+            await loadDefaultUriMatchType()
+        case .archivedPressed:
+            await archiveItem()
+        case .checkPasswordPressed:
+            await checkPassword()
+        case .copyTotpPressed:
+            services.pasteboardService.copy(state.loginState.authenticatorKey)
+            state.toast = Toast(title: Localizations.valueHasBeenCopied(Localizations.authenticatorKey))
+        case .dismissNewLoginActionCard:
+            state.isLearnNewLoginActionCardEligible = false
+            await services.stateService.setLearnNewLoginActionCardStatus(.complete)
+        case .fetchCipherOptions:
+            await fetchCipherOptions()
+        case .savePressed:
+            await saveItem()
+        case .scanCardButtonTapped:
+            await openCardScanner()
+        case .setupTotpPressed:
+            await setupTotp()
+        case .deletePressed:
+            await showSoftDeleteConfirmation()
+        case .showLearnNewLoginGuidedTour:
+            state.isLearnNewLoginActionCardEligible = false
+            await services.stateService.setLearnNewLoginActionCardStatus(.complete)
+            state.guidedTourViewState.currentIndex = 0
+            state.guidedTourViewState.showGuidedTour = true
+        case .streamCipherDetails:
+            await streamCipherDetails()
+        case .streamFolders:
+            await streamFolders()
+        case .unarchivePressed:
+            await unarchiveItem()
+        }
+    }
+
+    override func receive(_ action: AddEditItemAction) { // swiftlint:disable:this function_body_length
+        switch action {
+        case .addFolder:
+            coordinator.navigate(to: .addFolder, context: self)
+        case let .authKeyVisibilityTapped(newValue):
+            state.loginState.isAuthKeyVisible = newValue
+        case let .bankAccountFieldChanged(bankAccountFieldAction):
+            updateBankAccountState(&state, for: bankAccountFieldAction)
+        case let .cardFieldChanged(cardFieldAction):
+            updateCardState(&state, for: cardFieldAction)
+        case .clearUrl:
+            state.url = nil
+        case let .collectionToggleChanged(newValue, collectionId):
+            state.toggleCollection(newValue: newValue, collectionId: collectionId)
+        case let .customField(action):
+            handleCustomFieldAction(action)
+        case .dismissPressed:
+            handleDismiss()
+        case let .driversLicenseFieldChanged(driversLicenseFieldAction):
+            updateDriversLicenseState(&state, for: driversLicenseFieldAction)
+        case let .favoriteChanged(newValue):
+            state.isFavoriteOn = newValue
+        case let .folderChanged(newValue):
+            state.folder = newValue
+        case .generatePasswordPressed:
+            if state.loginState.password.isEmpty {
+                coordinator.navigate(to: .generator(.password), context: self)
+            } else {
+                presentReplacementAlert(for: .password)
+            }
+        case .generateUsernamePressed:
+            if state.loginState.username.isEmpty {
+                let emailWebsite = state.loginState.generatorEmailWebsite
+                coordinator.navigate(to: .generator(.username, emailWebsite: emailWebsite), context: self)
+            } else {
+                presentReplacementAlert(for: .username)
+            }
+        case let .guidedTourViewAction(action):
+            state.guidedTourViewState.updateStateForGuidedTourViewAction(action)
+        case let .identityFieldChanged(action):
+            updateIdentityState(&state, for: action)
+        case let .masterPasswordRePromptChanged(newValue):
+            state.isMasterPasswordRePromptOn = newValue
+        case let .morePressed(menuAction):
+            handleMenuAction(menuAction)
+        case let .nameChanged(newValue):
+            state.name = newValue
+        case .newCustomFieldPressed:
+            presentCustomFieldAlert()
+        case .newUriPressed:
+            state.loginState.uris.append(UriState())
+        case let .notesChanged(newValue):
+            state.notes = newValue
+        case let .ownerChanged(newValue):
+            state.owner = newValue
+        case let .passportFieldChanged(passportFieldAction):
+            updatePassportState(&state, for: passportFieldAction)
+        case let .passwordChanged(newValue):
+            state.loginState.password = newValue
+        case .removePasskeyPressed:
+            state.loginState.fido2Credentials = []
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+                UIAccessibility.post(notification: .announcement, argument: Localizations.passkeyRemoved)
+            }
+        case let .removeUriPressed(index):
+            guard index < state.loginState.uris.count else { return }
+            state.loginState.uris.remove(at: index)
+        case let .togglePasswordVisibilityChanged(newValue):
+            state.loginState.isPasswordVisible = newValue
+            if newValue, !state.configuration.isAdding {
+                Task {
+                    await services.eventService.collect(
+                        eventType: .cipherClientToggledPasswordVisible,
+                        cipherId: state.cipher.id,
+                    )
+                }
+            }
+        case let .sshKeyItemAction(sshKeyAction):
+            handleSSHKeyAction(sshKeyAction)
+        case let .toastShown(newValue):
+            state.toast = newValue
+        case let .toggleAdditionalOptionsExpanded(newValue):
+            state.isAdditionalOptionsExpanded = newValue
+        case .totpFieldLeftFocus:
+            parseAndValidateEditedAuthenticatorKey(state.loginState.totpState.rawAuthenticatorKeyString)
+        case let .totpKeyChanged(newValue):
+            state.loginState.totpState = LoginTOTPState(newValue)
+        case let .uriChanged(newValue, index: index):
+            guard state.loginState.uris.count > index else { return }
+            state.loginState.uris[index].uri = newValue
+        case let .uriTypeChanged(newValue, index):
+            guard index < state.loginState.uris.count else { return }
+            Task {
+                await confirmAndUpdateDefaultUriMatchType(newValue, index)
+            }
+        case let .usernameChanged(newValue):
+            state.loginState.username = newValue
+        }
+    }
+
+    // MARK: Private Methods
+
+    /// Applies a parsed card scan result to the item state, dismissing the scanner on success.
+    /// Only applies if both a card number and expiration month were detected.
+    ///
+    /// - Parameters:
+    ///   - state: The item state to update.
+    ///   - data: The parsed card data returned by the card text parser.
+    private func applyCardScanResult(_ state: inout AddEditItemState, data: ScannedCardData) {
+        guard data.cardNumber != nil,
+              data.expirationMonth != nil else {
+            return
+        }
+
+        state.cardItemState.isCardScannerPresented = false
+        state.cardItemState.shouldFocusCardholderNameAfterScan = true
+        if let number = data.cardNumber {
+            state.cardItemState.cardNumber = number
+            state.cardItemState.brand = .custom(CardComponent.Brand.detect(from: number))
+        }
+        if let month = data.expirationMonth,
+           let cardMonth = CardComponent.Month(rawValue: month) {
+            state.cardItemState.expirationMonth = .custom(cardMonth)
+        }
+        if let year = data.expirationYear {
+            state.cardItemState.expirationYear = year
+        }
+    }
+
+    /// Archives a cipher.
+    ///
+    private func archiveItem() async {
+        await vaultItemActionHelper.archive(cipher: state.cipher) { [weak self] in
+            await self?.navigateToPremiumUpgrade()
+        } completionHandler: { [weak self, delegate] in
+            self?.dismiss { delegate?.itemArchived() }
+        }
+    }
+
+    /// Navigates to the Premium upgrade flow. Uses the in-app upgrade path when available;
+    /// otherwise opens the web vault upgrade URL as a fallback.
+    ///
+    private func navigateToPremiumUpgrade() async {
+        await premiumUpgradeHelper.navigateToPremiumUpgrade()
+    }
+
+    /// Dismisses with an action.
+    /// - Parameter action: Action to execute when dismissing this view.
+    private func dismiss(action: @escaping () -> Void) {
+        coordinator.navigate(to: .dismiss(DismissAction(action: action)))
+    }
+
+    /// Handles dismissing the processor.
+    ///
+    /// - Parameter didAddItem: `true` if a new cipher was added or `false` if the user is
+    ///     dismissing the view without saving.
+    ///
+    private func handleDismiss(didAddItem: Bool = false) {
+        guard let appExtensionDelegate, appExtensionDelegate.isInAppExtensionSaveLoginFlow else {
+            let shouldDismiss = delegate?.itemAdded() ?? true
+            if shouldDismiss {
+                coordinator.navigate(to: .dismiss())
+            }
+            return
+        }
+
+        if didAddItem, let username = state.cipher.login?.username, let password = state.cipher.login?.password {
+            appExtensionDelegate.completeAutofillRequest(username: username, password: password, fields: nil)
+        } else {
+            appExtensionDelegate.didCancel()
+        }
+    }
+
+    /// Fetches any additional data (e.g. organizations and folders) needed for adding or editing a cipher.
+    private func fetchCipherOptions() async {
+        do {
+            state.organizationsWithPersonalOwnershipPolicy = await services.policyService
+                .organizationsApplyingPolicyToUser(.personalOwnership)
+            let isPersonalOwnershipDisabled = !state.organizationsWithPersonalOwnershipPolicy.isEmpty
+            let ownershipOptions = try await services.vaultRepository
+                .fetchCipherOwnershipOptions(includePersonal: !isPersonalOwnershipDisabled)
+
+            // We need read-only collections so that we can include them in the state
+            // to correctly calculate if the item can be deleted
+            state.allUserCollections = try await services.vaultRepository.fetchCollections(includeReadOnly: true)
+            // Filter out any collection IDs that aren't included in the fetched collections and aren't read-only.
+            state.collectionIds = state.collectionIds.filter { collectionId in
+                state.allUserCollections.contains(where: { $0.id == collectionId && !$0.readOnly })
+            }
+
+            state.isPersonalOwnershipDisabled = isPersonalOwnershipDisabled
+            state.ownershipOptions = ownershipOptions
+            if isPersonalOwnershipDisabled, state.organizationId == nil {
+                // Only set the owner if personal ownership is disabled and there isn't already an
+                // organization owner set. This prevents overwriting a preset owner when adding a
+                // new item from a collection group view.
+                state.owner = ownershipOptions.first
+            }
+
+            state.selectDefaultCollectionIfNeeded()
+
+            if !state.configuration.isAdding {
+                await services.eventService.collect(eventType: .cipherClientViewed, cipherId: state.cipher.id)
+            }
+        } catch {
+            services.errorReporter.log(error: error)
+        }
+    }
+
+    /// Handles an action associated with the `AddEditCustomFieldsAction`.
+    ///
+    /// - Parameter action: The action that was sent from the `AddEditCustomFieldsView`.
+    ///
+    private func handleCustomFieldAction(_ action: AddEditCustomFieldsAction) { // swiftlint:disable:this cyclomatic_complexity line_length
+        switch action {
+        case let .booleanFieldChanged(newValue, index):
+            guard state.customFieldsState.customFields.indices.contains(index) else { return }
+            state.customFieldsState.customFields[index].value = String(newValue).lowercased()
+        case let .customFieldAdded(type, name):
+            var customFieldState = CustomFieldState(name: name, type: type)
+            if type == .linked {
+                customFieldState.linkedIdType = LinkedIdType.getLinkedIdType(for: state.type).first
+            }
+            state.customFieldsState.customFields.append(customFieldState)
+        case let .customFieldChanged(newValue, index: index):
+            guard state.customFieldsState.customFields.indices.contains(index) else { return }
+            state.customFieldsState.customFields[index].value = newValue
+        case let .customFieldNameChanged(index, newValue):
+            guard state.customFieldsState.customFields.indices.contains(index) else { return }
+            state.customFieldsState.customFields[index].name = newValue
+        case let .editCustomFieldNamePressed(index: index):
+            guard state.customFieldsState.customFields.indices.contains(index) else { return }
+            presentEditCustomFieldNameAlert(oldName: state.customFieldsState.customFields[index].name, index: index)
+        case let .moveDownCustomFieldPressed(index: index):
+            guard state.customFieldsState.customFields.indices.contains(index),
+                  index != state.customFieldsState.customFields.indices.last else { return }
+            state.customFieldsState.customFields.swapAt(index, index + 1)
+        case let .moveUpCustomFieldPressed(index: index):
+            guard state.customFieldsState.customFields.indices.contains(index),
+                  index != state.customFieldsState.customFields.indices.first else { return }
+            state.customFieldsState.customFields.swapAt(index, index - 1)
+        case .newCustomFieldPressed:
+            presentCustomFieldAlert()
+        case let .removeCustomFieldPressed(index):
+            guard state.customFieldsState.customFields.indices.contains(index) else { return }
+            state.customFieldsState.customFields.remove(at: index)
+        case let .selectedCustomFieldType(type):
+            presentNameCustomFieldAlert(fieldType: type)
+        case let .selectedLinkedIdType(index, idType):
+            guard state.customFieldsState.customFields.indices.contains(index),
+                  state.customFieldsState.customFields[index].type == .linked else { return }
+            state.customFieldsState.customFields[index].linkedIdType = idType
+        case let .togglePasswordVisibilityChanged(isPasswordVisible, index):
+            guard state.customFieldsState.customFields.indices.contains(index) else { return }
+            state.customFieldsState.customFields[index].isPasswordVisible = isPasswordVisible
+            if isPasswordVisible {
+                Task {
+                    await services.eventService.collect(
+                        eventType: .cipherClientToggledHiddenFieldVisible,
+                        cipherId: state.cipher.id,
+                    )
+                }
+            }
+        }
+    }
+
+    /// Handles an action associated with the `VaultItemManagementMenuAction` menu.
+    ///
+    /// - Parameter action: The action that was sent from the menu.
+    ///
+    private func handleMenuAction(_ action: VaultItemManagementMenuAction) {
+        switch action {
+        case .attachments:
+            coordinator.navigate(to: .attachments(state.cipher))
+        case .clone:
+            // we don't show clone option in edit item state
+            break
+        case .editCollections:
+            coordinator.navigate(to: .editCollections(state.cipher), context: self)
+        case .moveToOrganization:
+            coordinator.navigate(to: .moveToOrganization(state.cipher), context: self)
+        case .restore:
+            // No-op: the restore button isn't shown when editing an item.
+            break
+        }
+    }
+
+    /// Handles `ViewSSHKeyItemAction` events.
+    /// - Parameter sshKeyAction: The action to handle
+    private func handleSSHKeyAction(_ sshKeyAction: ViewSSHKeyItemAction) {
+        switch sshKeyAction {
+        case .copyPressed:
+            return
+        case .privateKeyVisibilityPressed:
+            state.sshKeyState.isPrivateKeyVisible.toggle()
+            // TODO: PM-11977 Collect visibility toggled event
+        }
+    }
+
+    /// Loads the feature flags required for this processor.
+    private func loadFeatureFlags() async {
+        state.cardItemState.cardScannerEnabled = await services.configService.getFeatureFlag(.cardScanner)
+    }
+
+    /// Updates the bank account state based on the action received.
+    ///
+    /// - Parameters:
+    ///   - state: The parent `AddEditItemState` to be updated.
+    ///   - action: The `AddEditBankAccountItemAction` received.
+    private func updateBankAccountState(
+        _ state: inout AddEditItemState,
+        for action: AddEditBankAccountItemAction,
+    ) {
+        switch action {
+        case let .accountNumberChanged(accountNumber):
+            state.bankAccountItemState.accountNumber = accountNumber
+        case let .accountTypeChanged(accountType):
+            state.bankAccountItemState.accountType = accountType
+        case let .bankContactPhoneChanged(bankContactPhone):
+            state.bankAccountItemState.bankContactPhone = bankContactPhone
+        case let .bankNameChanged(bankName):
+            state.bankAccountItemState.bankName = bankName
+        case let .branchNumberChanged(branchNumber):
+            state.bankAccountItemState.branchNumber = branchNumber
+        case let .ibanChanged(iban):
+            state.bankAccountItemState.iban = iban
+        case let .nameOnAccountChanged(nameOnAccount):
+            state.bankAccountItemState.nameOnAccount = nameOnAccount
+        case let .pinChanged(pin):
+            state.bankAccountItemState.pin = pin
+        case let .routingNumberChanged(routingNumber):
+            state.bankAccountItemState.routingNumber = routingNumber
+        case let .swiftCodeChanged(swiftCode):
+            state.bankAccountItemState.swiftCode = swiftCode
+        case let .toggleAccountNumberVisibilityChanged(isVisible):
+            state.bankAccountItemState.isAccountNumberVisible = isVisible
+        case let .toggleIbanVisibilityChanged(isVisible):
+            state.bankAccountItemState.isIbanVisible = isVisible
+        case let .togglePinVisibilityChanged(isVisible):
+            state.bankAccountItemState.isPinVisible = isVisible
+        }
+    }
+
+    /// Receives an `AddEditCardItem` action from the `AddEditCardView` view's store, and updates
+    /// the `AddEditCardState`.
+    ///
+    /// - Parameters:
+    ///   - state: The parent `AddEditCardState` to be updated.
+    ///   - action: The `AddEditCardItemAction` received.
+    private func updateCardState(_ state: inout AddEditItemState, for action: AddEditCardItemAction) {
+        switch action {
+        case let .brandChanged(brand):
+            state.cardItemState.brand = brand
+        case let .cardholderNameChanged(name):
+            state.cardItemState.cardholderName = name
+        case let .cardNumberChanged(number):
+            state.cardItemState.cardNumber = number.filter(\.isNumber)
+        case .cardScannerDismissed:
+            state.cardItemState.isCardScannerPresented = false
+            state.cardItemState.shouldFocusCardholderNameAfterScan = false
+        case let .cardScannerLinesUpdated(lines):
+            applyCardScanResult(&state, data: services.cardTextParser.parseCard(lines: lines))
+        case let .cardSecurityCodeChanged(code):
+            state.cardItemState.cardSecurityCode = code
+        case let .expirationMonthChanged(month):
+            state.cardItemState.expirationMonth = month
+        case let .expirationYearChanged(year):
+            state.cardItemState.expirationYear = year
+        case let .toggleCodeVisibilityChanged(isVisible):
+            state.cardItemState.isCodeVisible = isVisible
+            if isVisible {
+                let cipherId = state.cipher.id
+                Task {
+                    await services.eventService.collect(
+                        eventType: .cipherClientToggledCardCodeVisible,
+                        cipherId: cipherId,
+                    )
+                }
+            }
+        case let .toggleNumberVisibilityChanged(isVisible):
+            state.cardItemState.isNumberVisible = isVisible
+            if isVisible {
+                let cipherId = state.cipher.id
+                Task {
+                    await services.eventService.collect(
+                        eventType: .cipherClientToggledCardNumberVisible,
+                        cipherId: cipherId,
+                    )
+                }
+            }
+        }
+    }
+
+    /// Receives an `AddEditDriversLicenseItem` action from the `AddEditDriversLicenseItemView` view's store, and
+    /// updates the `DriversLicenseItemState`.
+    ///
+    /// - Parameters:
+    ///   - state: The parent `AddEditItemState` to be updated.
+    ///   - action: The `AddEditDriversLicenseItemAction` received.
+    private func updateDriversLicenseState(
+        _ state: inout AddEditItemState,
+        for action: AddEditDriversLicenseItemAction,
+    ) {
+        switch action {
+        case let .firstNameChanged(firstName):
+            state.driversLicenseItemState.firstName = firstName
+        case let .issuingAuthorityChanged(issuingAuthority):
+            state.driversLicenseItemState.issuingAuthority = issuingAuthority
+        case let .issuingCountryChanged(issuingCountry):
+            state.driversLicenseItemState.issuingCountry = issuingCountry
+        case let .issuingStateChanged(issuingState):
+            state.driversLicenseItemState.issuingState = issuingState
+        case let .lastNameChanged(lastName):
+            state.driversLicenseItemState.lastName = lastName
+        case let .licenseClassChanged(licenseClass):
+            state.driversLicenseItemState.licenseClass = licenseClass
+        case let .licenseNumberChanged(licenseNumber):
+            state.driversLicenseItemState.licenseNumber = licenseNumber
+        case let .middleNameChanged(middleName):
+            state.driversLicenseItemState.middleName = middleName
+        case let .toggleLicenseNumberVisibilityChanged(isVisible):
+            state.driversLicenseItemState.isLicenseNumberVisible = isVisible
+        }
+    }
+
+    /// Receives an `AddEditIdentityItem` action from the `AddEditIdentityView` view's store, and updates
+    /// the `AddEditIdentityState`.
+    ///
+    /// - Parameters:
+    ///   - state: The parent `AddEditItemState` to be updated.
+    ///   - action: The `AddEditIdentityItemAction` received.
+    private func updateIdentityState(_ state: inout AddEditItemState, for action: AddEditIdentityItemAction) {
+        switch action {
+        case let .firstNameChanged(firstName):
+            state.identityState.firstName = firstName
+        case let .middleNameChanged(middleName):
+            state.identityState.middleName = middleName
+        case let .titleChanged(title):
+            state.identityState.title = title
+        case let .lastNameChanged(lastName):
+            state.identityState.lastName = lastName
+        case let .userNameChanged(userName):
+            state.identityState.userName = userName
+        case let .companyChanged(company):
+            state.identityState.company = company
+        case let .socialSecurityNumberChanged(ssn):
+            state.identityState.socialSecurityNumber = ssn
+        case let .passportNumberChanged(passportNumber):
+            state.identityState.passportNumber = passportNumber
+        case let .licenseNumberChanged(licenseNumber):
+            state.identityState.licenseNumber = licenseNumber
+        case let .ssnVisibilityChanged(isVisible):
+            state.identityState.showSocialSecurityNumber = isVisible
+        case let .emailChanged(email):
+            state.identityState.email = email
+        case let .phoneNumberChanged(phoneNumber):
+            state.identityState.phone = phoneNumber
+        case let .address1Changed(address1):
+            state.identityState.address1 = address1
+        case let .address2Changed(address2):
+            state.identityState.address2 = address2
+        case let .address3Changed(address3):
+            state.identityState.address3 = address3
+        case let .cityOrTownChanged(cityOrTown):
+            state.identityState.cityOrTown = cityOrTown
+        case let .stateChanged(stateProvince):
+            state.identityState.state = stateProvince
+        case let .postalCodeChanged(postalCode):
+            state.identityState.postalCode = postalCode
+        case let .countryChanged(country):
+            state.identityState.country = country
+        }
+    }
+
+    /// Receives an `AddEditPassportItem` action from the `AddEditPassportItemView` view's store, and
+    /// updates the `PassportItemState`.
+    ///
+    /// - Parameters:
+    ///   - state: The parent `AddEditItemState` to be updated.
+    ///   - action: The `AddEditPassportItemAction` received.
+    private func updatePassportState(_ state: inout AddEditItemState, for action: AddEditPassportItemAction) {
+        switch action {
+        case let .birthPlaceChanged(birthPlace):
+            state.passportItemState.birthPlace = birthPlace
+        case let .givenNameChanged(givenName):
+            state.passportItemState.givenName = givenName
+        case let .issuingAuthorityChanged(issuingAuthority):
+            state.passportItemState.issuingAuthority = issuingAuthority
+        case let .issuingCountryChanged(issuingCountry):
+            state.passportItemState.issuingCountry = issuingCountry
+        case let .nationalIdentificationNumberChanged(nationalIdentificationNumber):
+            state.passportItemState.nationalIdentificationNumber = nationalIdentificationNumber
+        case let .nationalityChanged(nationality):
+            state.passportItemState.nationality = nationality
+        case let .passportNumberChanged(passportNumber):
+            state.passportItemState.passportNumber = passportNumber
+        case let .passportTypeChanged(passportType):
+            state.passportItemState.passportType = passportType
+        case let .sexChanged(sex):
+            state.passportItemState.sex = sex
+        case let .surnameChanged(surname):
+            state.passportItemState.surname = surname
+        case let .toggleNationalIdentificationNumberVisibilityChanged(isVisible):
+            state.passportItemState.isNationalIdentificationNumberVisible = isVisible
+        case let .togglePassportNumberVisibilityChanged(isVisible):
+            state.passportItemState.isPassportNumberVisible = isVisible
+        }
+    }
+
+    /// Unarchives cipher.
+    ///
+    private func unarchiveItem() async {
+        await vaultItemActionHelper.unarchive(cipher: state.cipher) { [weak self, delegate] in
+            self?.dismiss { delegate?.itemUnarchived() }
+        }
+    }
+
+    /// Checks the eligibility of the Learn New Login action card.
+    ///
+    private func checkLearnNewLoginActionCardEligibility() async {
+        if appExtensionDelegate == nil {
+            state.isLearnNewLoginActionCardEligible = await services.stateService
+                .getLearnNewLoginActionCardStatus() == .incomplete
+        }
+    }
+
+    /// Load the saved value in autofill settings for the default URI match type.
+    ///
+    private func loadDefaultUriMatchType() async {
+        state.loginState.defaultUriMatchTypeSettingsValue = await services.stateService.getDefaultUriMatchType()
+    }
+
+    /// Checks the password currently stored in `state`.
+    ///
+    private func checkPassword() async {
+        coordinator.showLoadingOverlay(title: Localizations.checkingPassword)
+        defer { coordinator.hideLoadingOverlay() }
+        do {
+            let breachCount = try await services.apiService.checkDataBreaches(password: state.loginState.password)
+            coordinator.showAlert(.dataBreachesCountAlert(count: breachCount))
+        } catch {
+            services.errorReporter.log(error: error)
+        }
+    }
+
+    /// Builds an actions sheet for creating a new custom field and then routes the coordinator
+    /// to the `.alert` route.
+    ///
+    private func presentCustomFieldAlert() {
+        let actions = state.type.allowedFieldTypes.map { type in
+            AlertAction(title: type.localizedName, style: .default) { [weak self] _ in
+                guard let self else { return }
+                receive(
+                    .customField(
+                        .selectedCustomFieldType(type),
+                    ),
+                )
+            }
+        }
+
+        let alertActions = actions + [AlertAction(title: Localizations.cancel, style: .cancel)]
+
+        let alert = Alert(
+            title: Localizations.selectTypeField,
+            message: nil,
+            preferredStyle: .actionSheet,
+            alertActions: alertActions,
+        )
+        coordinator.showAlert(alert)
+    }
+
+    /// Builds an alert to edit  name of a custom field and then routes the coordinator
+    /// to the `.alert` route.
+    ///
+    private func presentEditCustomFieldNameAlert(oldName: String?, index: Int) {
+        let alert = Alert.nameCustomFieldAlert(text: oldName) { [weak self] name in
+            guard let self else { return }
+            receive(
+                .customField(
+                    .customFieldNameChanged(
+                        index: index,
+                        newValue: name,
+                    ),
+                ),
+            )
+        }
+        coordinator.showAlert(alert)
+    }
+
+    /// Builds an alert to name a new custom field and then routes the coordinator
+    /// to the `.alert` route.
+    ///
+    private func presentNameCustomFieldAlert(fieldType: FieldType) {
+        let alert = Alert.nameCustomFieldAlert { [weak self] name in
+            guard let self else { return }
+            receive(.customField(.customFieldAdded(fieldType, name)))
+        }
+        coordinator.showAlert(alert)
+    }
+
+    /// Builds and navigates to an alert for overwriting an existing value for the specified type.
+    ///
+    /// - Parameter type: The `GeneratorType` that is being overwritten.
+    ///
+    private func presentReplacementAlert(for type: GeneratorType) {
+        let title = switch type {
+        case .passphrase, .password:
+            Localizations.passwordOverrideAlert
+        case .username:
+            Localizations.areYouSureYouWantToOverwriteTheCurrentUsername
+        }
+
+        let alert = Alert(
+            title: title,
+            message: nil,
+            alertActions: [
+                AlertAction(title: Localizations.no, style: .default),
+                AlertAction(
+                    title: Localizations.yes,
+                    style: .default,
+                    handler: { [weak self] _ in
+                        let emailWebsite = self?.state.loginState.generatorEmailWebsite
+                        self?.coordinator.navigate(to: .generator(type, emailWebsite: emailWebsite), context: self)
+                    },
+                ),
+            ],
+        )
+        coordinator.showAlert(alert)
+    }
+
+    /// Saves the item currently stored in `state`.
+    ///
+    private func saveItem() async {
+        guard state.cipher.organizationId == nil || !state.cipher.collectionIds.isEmpty else {
+            coordinator.showAlert(
+                .defaultAlert(
+                    title: Localizations.anErrorHasOccurred,
+                    message: Localizations.selectOneCollection,
+                ),
+            )
+            return
+        }
+
+        defer { coordinator.hideLoadingOverlay() }
+        do {
+            try EmptyInputValidator(fieldName: Localizations.name)
+                .validate(input: state.name)
+
+            let userVerified = try await fido2CheckUserIfNeeded()
+
+            coordinator.showLoadingOverlay(title: Localizations.saving)
+            switch state.configuration {
+            case .add:
+                try await addItem(fido2UserVerified: userVerified)
+            case let .existing(cipherView):
+                try await updateItem(cipherView: cipherView)
+            }
+        } catch let error as InputValidationError {
+            coordinator.showAlert(Alert.inputValidationAlert(error: error))
+            return
+        } catch UserVerificationError.cancelled {
+            return
+        } catch let error as ServerError
+            where error.message.contains("Cipher was not encrypted for the current user") {
+            await coordinator.showErrorAlert(error: error)
+            services.errorReporter.log(error: BitwardenError.generalError(
+                type: "Save item failed",
+                message: error.message,
+                error: error,
+            ))
+            return
+        } catch {
+            await coordinator.showErrorAlert(error: error)
+            services.errorReporter.log(error: error)
+        }
+    }
+
+    /// Adds the item currently in `state`.
+    ///
+    private func addItem(fido2UserVerified: Bool) async throws {
+        if let credentialProviderExtensionDelegate = appExtensionDelegate as? CredentialProviderExtensionDelegate,
+           credentialProviderExtensionDelegate.isCreatingFido2Credential {
+            services.fido2UserInterfaceHelper.pickedCredentialForCreation(
+                result: .success(
+                    CheckUserAndPickCredentialForCreationResult(
+                        cipher: CipherViewWrapper(cipher: state.cipher),
+                        checkUserResult: CheckUserResult(userPresent: true, userVerified: fido2UserVerified),
+                    ),
+                ),
+            )
+            return
+        }
+
+        try await services.vaultRepository.addCipher(state.cipher)
+        coordinator.hideLoadingOverlay()
+
+        if let credentialProviderExtensionDelegate = appExtensionDelegate as? CredentialProviderExtensionDelegate,
+           credentialProviderExtensionDelegate.isSavingPasswordCredential {
+            credentialProviderExtensionDelegate.completeSavePasswordRequest()
+            return
+        }
+
+        handleDismiss(didAddItem: true)
+        await services.reviewPromptService.trackUserAction(.addedNewItem)
+    }
+
+    /// Checks user verification if needed on Fido2 flows.
+    private func fido2CheckUserIfNeeded() async throws -> Bool {
+        guard let credentialProviderExtensionDelegate = appExtensionDelegate as? CredentialProviderExtensionDelegate,
+              credentialProviderExtensionDelegate.isCreatingFido2Credential,
+              let fido2CreationOptions = services.fido2UserInterfaceHelper.fido2CreationOptions else {
+            return false
+        }
+
+        let result = try await services.fido2UserInterfaceHelper.checkUser(
+            userVerificationPreference: fido2CreationOptions.requireVerification,
+            credential: state.cipher,
+            shouldThrowEnforcingRequiredVerification: true,
+        )
+        return result.userVerified
+    }
+
+    /// Soft Deletes the item currently stored in `state`.
+    ///
+    private func softDeleteItem() async {
+        defer { coordinator.hideLoadingOverlay() }
+        do {
+            coordinator.showLoadingOverlay(title: Localizations.softDeleting)
+            try await services.vaultRepository.softDeleteCipher(state.cipher)
+            coordinator.navigate(to: .dismiss(DismissAction(action: { [delegate] in delegate?.itemSoftDeleted() })))
+        } catch {
+            await coordinator.showErrorAlert(error: error)
+            services.errorReporter.log(error: error)
+        }
+    }
+
+    /// Shows the password autofill information alert if it hasn't been shown before and the user
+    /// is adding a new login in the app.
+    ///
+    private func showPasswordAutofillAlertIfNeeded() async {
+        guard await !services.stateService.getAddSitePromptShown(),
+              state.configuration == .add,
+              state.type == .login,
+              !(appExtensionDelegate?.isInAppExtension ?? false) else {
+            return
+        }
+        coordinator.showAlert(.passwordAutofillInformation())
+        await services.stateService.setAddSitePromptShown(true)
+    }
+
+    /// Streams cipher details for the current cipher, updating state whenever the vault repository
+    /// emits an updated `CipherView`. When the current TOTP state contains a key (i.e., it was
+    /// set via BWA import and is not yet persisted to the server), that key is preserved and all
+    /// other login fields (password, username, URIs, etc.) are updated normally. When the current
+    /// TOTP state is `.none`, the full cipher view is applied so that any TOTP key added on
+    /// another client is not silently discarded.
+    private func streamCipherDetails() async {
+        guard let cipherId = state.cipher.id else { return }
+        do {
+            for try await cipherView in try await services.vaultRepository.cipherDetailsPublisher(id: cipherId) {
+                guard let cipherView else { continue }
+                let totpOverride: LoginTOTPState? = state.loginState.totpState == .none
+                    ? nil
+                    : state.loginState.totpState
+                state.update(from: cipherView, preservingTOTPState: totpOverride)
+            }
+        } catch {
+            services.errorReporter.log(error: error)
+            await coordinator.showErrorAlert(error: error)
+        }
+    }
+
+    /// Stream the list of folders.
+    ///
+    private func streamFolders() async {
+        do {
+            for try await folders in try await services.settingsRepository.foldersListPublisher() {
+                state.folders = [.default] + folders.map { DefaultableType.custom($0) }
+            }
+        } catch {
+            services.errorReporter.log(error: error)
+        }
+    }
+
+    /// Check if the user has a master password and set showMasterPasswordReprompt accordingly
+    ///
+    private func checkIfUserHasMasterPassword() async {
+        do {
+            state.showMasterPasswordReprompt = try await services.authRepository.hasMasterPassword()
+        } catch {
+            services.errorReporter.log(error: error)
+        }
+    }
+
+    /// Shows a soft delete cipher confirmation alert.
+    ///
+    private func showSoftDeleteConfirmation() async {
+        let alert = Alert.deleteCipherConfirmation(isSoftDelete: true) { [weak self] in
+            guard let self else { return }
+            await softDeleteItem()
+        }
+        coordinator.showAlert(alert)
+    }
+
+    /// Displays a warning for user to confirm if wants to update the ciphers's UriMatchType if necessary
+    ///
+    /// - Parameter newUriMatchType: The default URI match type.
+    ///
+    private func confirmAndUpdateDefaultUriMatchType(
+        _ newUriMatchType: DefaultableType<UriMatchType>,
+        _ index: Int,
+    ) async {
+        switch newUriMatchType.customValue {
+        case .regularExpression:
+            coordinator.showAlert(
+                .confirmRegularExpressionMatchDetectionAlert {
+                    await self.updateUriMatchType(
+                        newUriMatchType: newUriMatchType,
+                        index: index,
+                        learnMoreLocalizedMatchType: Localizations.regEx,
+                    )
+                },
+            )
+        case .startsWith:
+            coordinator.showAlert(
+                .confirmStartsWithMatchDetectionAlert {
+                    await self.updateUriMatchType(
+                        newUriMatchType: newUriMatchType,
+                        index: index,
+                        learnMoreLocalizedMatchType: Localizations.startsWith,
+                    )
+                },
+            )
+        default:
+            await updateUriMatchType(
+                newUriMatchType: newUriMatchType,
+                index: index,
+                learnMoreLocalizedMatchType: nil,
+            )
+        }
+    }
+
+    /// Updates the URI match type value for the uri.
+    ///
+    /// - Parameters:
+    ///   - updateUriMatchType: The new selected URI match type.
+    ///   - index: The index of the uri to update the URI Match type.
+    ///   - learnMoreLocalizedMatchType: The localized text to display on the learn more dialog.
+    ///
+    private func updateUriMatchType(
+        newUriMatchType: DefaultableType<UriMatchType>,
+        index: Int,
+        learnMoreLocalizedMatchType: String?,
+    ) async {
+        state.loginState.uris[index].matchType = newUriMatchType
+
+        if let learnMoreText = learnMoreLocalizedMatchType, !learnMoreText.isEmpty {
+            showLearnMoreAlert(learnMoreText)
+        }
+    }
+
+    /// Updates the item currently in `state`.
+    ///
+    private func updateItem(cipherView: CipherView) async throws {
+        try await services.vaultRepository.updateCipher(cipherView.updatedView(with: state))
+        coordinator.hideLoadingOverlay()
+        let shouldDismissed = delegate?.itemUpdated() ?? true
+        if shouldDismissed {
+            coordinator.navigate(to: .dismiss())
+        }
+    }
+
+    /// Checks camera authorization and either opens the card scanner sheet or shows a
+    /// camera-permission-required alert with a link to iOS Settings.
+    ///
+    private func openCardScanner() async {
+        let status = await services.cameraService.checkStatusOrRequestCameraAuthorization()
+        guard status == .authorized else {
+            coordinator.showAlert(.cameraPermissionRequired { [weak self] in
+                self?.state.url = URL(string: UIApplication.openSettingsURLString)
+            })
+            return
+        }
+        await MainActor.run {
+            state.cardItemState.isCardScannerPresented = true
+        }
+    }
+
+    /// Kicks off the TOTP setup flow.
+    ///
+    private func setupTotp() async {
+        guard services.cameraService.deviceSupportsCamera(),
+              appExtensionDelegate?.isInAppExtension != true // Extensions don't allow camera access.
+        else {
+            coordinator.navigate(to: .setupTotpManual, context: self)
+            return
+        }
+        let status = await services.cameraService.checkStatusOrRequestCameraAuthorization()
+        if status == .authorized {
+            await coordinator.handleEvent(.showScanCode, context: self)
+        } else {
+            coordinator.navigate(to: .setupTotpManual, context: self)
+        }
+    }
+
+    /// Shows an alert asking the user if he wants to know more about Uri Matching
+    private func showLearnMoreAlert(_ defaultUriMatchTypeName: String) {
+        coordinator.showAlert(.learnMoreAdvancedMatchingDetection(defaultUriMatchTypeName) {
+            self.state.url = ExternalLinksConstants.uriMatchDetections
+        })
+    }
+}
+
+extension AddEditItemProcessor: GeneratorCoordinatorDelegate {
+    func didCancelGenerator() {
+        coordinator.navigate(to: .dismiss())
+    }
+
+    func didCompleteGenerator(for type: GeneratorType, with value: String) {
+        switch type {
+        case .passphrase,
+             .password:
+            state.loginState.password = value
+        case .username:
+            state.loginState.username = value
+        }
+        coordinator.navigate(to: .dismiss())
+    }
+}
+
+// MARK: - AddEditFolderDelegate
+
+extension AddEditItemProcessor: AddEditFolderDelegate {
+    func folderAdded(_ folderView: FolderView) {
+        state.folder = .custom(folderView)
+    }
+
+    func folderDeleted() {
+        // No-op: deleting a folder isn't supported from the add folder flow.
+    }
+
+    func folderEdited() {
+        // No-op: editing a folder isn't supported from the add folder flow.
+    }
+}
+
+extension AddEditItemProcessor: AuthenticatorKeyCaptureDelegate {
+    func didCompleteCapture(
+        _ captureCoordinator: AnyCoordinator<AuthenticatorKeyCaptureRoute, AuthenticatorKeyCaptureEvent>,
+        with value: String,
+    ) {
+        let dismissAction = DismissAction(action: { [weak self] in
+            self?.parseAndValidateCapturedAuthenticatorKey(value)
+        })
+        captureCoordinator.navigate(to: .dismiss(dismissAction))
+    }
+
+    func parseAndValidateCapturedAuthenticatorKey(_ key: String) {
+        do {
+            let authKeyModel = try services.totpService.getTOTPConfiguration(key: key)
+            state.loginState.totpState = .key(authKeyModel)
+            state.toast = Toast(title: Localizations.authenticatorKeyAdded)
+        } catch {
+            coordinator.showAlert(.totpScanFailureAlert())
+        }
+    }
+
+    func parseAndValidateEditedAuthenticatorKey(_ key: String?) {
+        guard key != state.loginState.totpState.authKeyModel?.rawAuthenticatorKey else { return }
+        let newState = LoginTOTPState(key)
+        state.loginState.totpState = newState
+        coordinator.showAlert(.totpScanFailureAlert())
+    }
+
+    func showCameraScan(
+        _ captureCoordinator: AnyCoordinator<AuthenticatorKeyCaptureRoute, AuthenticatorKeyCaptureEvent>,
+    ) {
+        guard services.cameraService.deviceSupportsCamera() else { return }
+        let dismissAction = DismissAction(action: { [weak self] in
+            guard let self else { return }
+            Task {
+                await self.coordinator.handleEvent(.showScanCode, context: self)
+            }
+        })
+        captureCoordinator.navigate(to: .dismiss(dismissAction))
+    }
+
+    func showManualEntry(
+        _ captureCoordinator: AnyCoordinator<AuthenticatorKeyCaptureRoute, AuthenticatorKeyCaptureEvent>,
+    ) {
+        let dismissAction = DismissAction(action: { [weak self] in
+            self?.coordinator.navigate(to: .setupTotpManual, context: self)
+        })
+        captureCoordinator.navigate(to: .dismiss(dismissAction))
+    }
+}
+
+// MARK: - EditCollectionsProcessorDelegate
+
+extension AddEditItemProcessor: EditCollectionsProcessorDelegate {
+    func didUpdateCipher() {
+        state.toast = Toast(title: Localizations.itemUpdated)
+    }
+}
+
+// MARK: - MoveToOrganizationProcessorDelegate
+
+extension AddEditItemProcessor: MoveToOrganizationProcessorDelegate {
+    func didMoveCipher(_ cipher: CipherView, to organization: CipherOwner) {
+        state.toast = Toast(title: Localizations.movedItemToOrg(cipher.name, organization.localizedName))
+    }
+} // swiftlint:disable:this file_length

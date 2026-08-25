@@ -1,0 +1,319 @@
+import BitwardenKit
+import BitwardenResources
+@preconcurrency import BitwardenSdk
+import Foundation
+
+/// Data model for an item displayed in the vault list.
+///
+public struct VaultListItem: Equatable, Identifiable, Sendable, VaultItemWithDecorativeIcon {
+    // MARK: Types
+
+    /// An enumeration for the type of item being displayed by this item.
+    public enum ItemType: Equatable, Sendable {
+        /// The wrapped item is a cipher.
+        ///
+        /// - Parameters
+        ///   - CipherListView: The cipher to wrap.
+        ///   - Fido2CredentialAutofillView: Additional data from the main Fido2 credential
+        ///   of the `CipherListView` to be displayed when needed (Optional).
+        ///
+        case cipher(CipherListView, Fido2CredentialAutofillView? = nil)
+
+        /// The wrapped item is a group of items.
+        case group(VaultListGroup, Int)
+
+        /// A TOTP Code Item.
+        ///
+        /// - Parameters
+        ///   - name: The name of the Cipher, used for sorting.
+        ///   - totpModel: The TOTP model for a cipher.
+        ///
+        case totp(name: String, totpModel: VaultListTOTP)
+    }
+
+    // MARK: Static properties
+
+    /// The default sort descriptor to use to order `VaultListItem`s.
+    static let defaultSortDescriptor = SortDescriptorWrapper<VaultListItem>(\.sortValue, comparator: .localizedStandard)
+
+    // MARK: Properties
+
+    /// The identifier for the item.
+    public let id: String
+
+    /// Whether the user has Premium subscription.
+    /// This is only used on Archive group for now, so it's not being set for any other occasions.
+    public let hasPremium: Bool
+
+    /// The type of item being displayed by this item.
+    public let itemType: ItemType
+}
+
+extension VaultListItem {
+    /// What's used to sort `VaultListItem`s depending on its item type.
+    var sortValue: String {
+        switch itemType {
+        case let .cipher(cipherListView, _):
+            cipherListView.name
+        case .group:
+            ""
+        case let .totp(name, model):
+            name + (model.cipherListView.type.loginListView?.username ?? "") + "\(model.id)"
+        }
+    }
+}
+
+extension VaultListItem {
+    /// Initialize a `VaultListItem` from a `CipherListView`.
+    ///
+    /// - Parameter cipherListView: The `CipherListView` used to initialize the `VaultListItem`.
+    ///
+    init?(cipherListView: CipherListView) {
+        guard let id = cipherListView.id else { return nil }
+        self.init(id: id, itemType: .cipher(cipherListView))
+    }
+
+    /// Initialize a `VaultListItem` from a `CipherListView`.
+    /// - Parameters:
+    ///   - cipherListView: The `CipherListView` used to initialize the `VaultListItem`.
+    ///   - fido2CredentialAutofillView: The main Fido2 credential of the `cipherView` prepared for UI display.
+    init?(cipherListView: CipherListView, fido2CredentialAutofillView: Fido2CredentialAutofillView) {
+        guard let id = cipherListView.id, cipherListView.type.isLogin else { return nil }
+        self.init(id: id, itemType: .cipher(cipherListView, fido2CredentialAutofillView))
+    }
+
+    /// Initialize a `VaultListItem` from an ID and an `ItemType`.
+    /// - Parameters:
+    ///   - id: The ID of the item.
+    ///   - itemType: The `ItemType` of the item.
+    init(id: String, itemType: ItemType) {
+        self.init(id: id, hasPremium: false, itemType: itemType)
+    }
+}
+
+extension VaultListItem {
+    /// The accessory icon to use on the trailing side of the row.
+    var accessoryIcon: SharedImageAsset? {
+        switch itemType {
+        case let .group(group, count):
+            isPremiumSubscriptionRequired(group: group, count: count)
+                ? SharedAsset.Icons.locked24
+                : nil
+        default:
+            nil
+        }
+    }
+
+    var cipherDecorativeIconDataView: CipherDecorativeIconDataView? {
+        loginListView
+    }
+
+    /// The RpId of the main Fido2 credential.
+    var fido2CredentialRpId: String? {
+        switch itemType {
+        case let .cipher(_, fido2CredentialAutofillView):
+            fido2CredentialAutofillView?.rpId ?? nil
+        case .group:
+            nil
+        case .totp:
+            nil
+        }
+    }
+
+    /// An image asset for this item that can be used in the UI.
+    var icon: SharedImageAsset {
+        switch itemType {
+        case let .cipher(cipherItem, fido2CredentialAutofillView):
+            switch cipherItem.type {
+            case .card:
+                SharedAsset.Icons.card24
+            case .identity:
+                SharedAsset.Icons.idCard24
+            case .login:
+                fido2CredentialAutofillView != nil ? SharedAsset.Icons.passkey24 : SharedAsset.Icons.globe24
+            case .secureNote:
+                SharedAsset.Icons.file24
+            case .sshKey:
+                SharedAsset.Icons.key24
+            case .bankAccount:
+                SharedAsset.Icons.bankAccount24
+            case .driversLicense:
+                SharedAsset.Icons.idCard24
+            case .passport:
+                SharedAsset.Icons.idCard24
+            }
+        case let .group(group, _):
+            switch group {
+            case .bankAccount:
+                SharedAsset.Icons.bankAccount24
+            case .card:
+                SharedAsset.Icons.card24
+            case .collection:
+                SharedAsset.Icons.collections24
+            case .driversLicense:
+                SharedAsset.Icons.idCard24
+            case .folder,
+                 .noFolder:
+                SharedAsset.Icons.folder24
+            case .identity:
+                SharedAsset.Icons.idCard24
+            case .login:
+                SharedAsset.Icons.globe24
+            case .passport:
+                SharedAsset.Icons.idCard24
+            case .secureNote:
+                SharedAsset.Icons.file24
+            case .sshKey:
+                SharedAsset.Icons.key24
+            case .totp:
+                SharedAsset.Icons.clock24
+            case .trash:
+                SharedAsset.Icons.trash24
+            case .archive:
+                SharedAsset.Icons.archive24
+            }
+        case .totp:
+            SharedAsset.Icons.clock24
+        }
+    }
+
+    /// The accessibility ID for the ciphers icon.
+    var iconAccessibilityId: String {
+        switch itemType {
+        case let .cipher(cipherItem, _):
+            switch cipherItem.type {
+            case .card:
+                "CardCipherIcon"
+            case .identity:
+                "IdentityCipherIcon"
+            case .login:
+                "LoginCipherIcon"
+            case .secureNote:
+                "SecureNoteCipherIcon"
+            case .sshKey:
+                "SSHKeyCipherIcon"
+            case .bankAccount:
+                "BankAccountCipherIcon"
+            case .driversLicense:
+                "DriverLicenseCipherIcon"
+            case .passport:
+                "PassportCipherIcon"
+            }
+        default:
+            ""
+        }
+    }
+
+    /// The accessibility ID for each vault item.
+    var vaultItemAccessibilityId: String {
+        switch itemType {
+        case let .group(vaultListGroup, _):
+            switch vaultListGroup {
+            case .archive:
+                "ArchiveCell"
+            case .trash:
+                "TrashCell"
+            case .collection:
+                "CollectionCell"
+            case .folder:
+                "FolderCell"
+            case .bankAccount:
+                "BankAccountCell"
+            case .card:
+                "CardCell"
+            case .driversLicense:
+                "DriversLicenseCell"
+            case .identity:
+                "IdentityCell"
+            case .login:
+                "LoginCell"
+            case .passport:
+                "PassportCell"
+            case .secureNote:
+                "SecureNoteCell"
+            case .sshKey:
+                "SSHKeyCell"
+            case .totp:
+                "TOTPCell"
+            case .noFolder:
+                "ItemFilterCell"
+            }
+        case .cipher:
+            "CipherCell"
+        case .totp:
+            "TOTPCell"
+        }
+    }
+
+    /// The login view containing the uri's to download the special decorative icon, if applicable.
+    var loginListView: BitwardenSdk.LoginListView? {
+        switch itemType {
+        case let .cipher(cipherView, _):
+            cipherView.type.loginListView
+        case .group:
+            nil
+        case let .totp(_, totpModel):
+            totpModel.cipherListView.type.loginListView
+        }
+    }
+
+    /// Whether to show or not the Fido2 credential RpId
+    var shouldShowFido2CredentialRpId: Bool {
+        switch itemType {
+        case let .cipher(cipherView, fido2CredentialAutofillView):
+            guard let fido2CredentialRpId, !fido2CredentialRpId.isEmpty else {
+                return false
+            }
+            return fido2CredentialAutofillView != nil && cipherView.name != fido2CredentialRpId
+        case .group:
+            return false
+        case .totp:
+            return false
+        }
+    }
+
+    /// The subtitle to show in the row.
+    var subtitle: String? {
+        switch itemType {
+        case let .cipher(cipherView, fido2CredentialAutofillView):
+            fido2CredentialAutofillView?.userNameForUi ?? cipherView.subtitle
+        case let .group(group, count):
+            isPremiumSubscriptionRequired(group: group, count: count)
+                ? Localizations.premiumSubscriptionRequired
+                : nil
+        case .totp:
+            nil
+        }
+    }
+
+    // MARK: Private methods
+
+    /// Whether Premium subscription is required
+    /// - Parameters:
+    ///   - group: The vault list group to check.
+    ///   - count: The count of the group to check.
+    /// - Returns: `true` if required, `false` otherwise.
+    func isPremiumSubscriptionRequired(group: VaultListGroup, count: Int) -> Bool {
+        if !hasPremium, group == .archive, count == 0 {
+            return true
+        }
+        return false
+    }
+}
+
+public struct VaultListTOTP: Equatable, Sendable {
+    /// The id of the associated Cipher.
+    ///
+    let id: String
+
+    /// The `BitwardenSdk.CipherListView` used to populate the view and regenerate codes.
+    ///
+    let cipherListView: BitwardenSdk.CipherListView
+
+    /// Whether seeing the TOTP code requires a master password.
+    let requiresMasterPassword: Bool
+
+    /// The current TOTP code for the cipher.
+    ///
+    var totpCode: TOTPCodeModel
+}

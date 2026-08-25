@@ -1,0 +1,548 @@
+import BitwardenResources
+import BitwardenSdk
+import TestHelpers
+import XCTest
+
+@testable import BitwardenShared
+@testable import BitwardenSharedMocks
+
+class VaultListItemTests: BitwardenTestCase { // swiftlint:disable:this type_body_length
+    // MARK: Properties
+
+    var subject: VaultListItem!
+
+    override func setUp() {
+        super.setUp()
+
+        subject = .fixture()
+    }
+
+    override func tearDown() {
+        super.tearDown()
+
+        subject = nil
+    }
+
+    // MARK: Tests
+
+    /// `accessoryIcon` returns nil for cipher items.
+    func test_accessoryIcon_cipher() {
+        let item = VaultListItem(cipherListView: .fixture(login: .fixture()))
+        XCTAssertNil(item?.accessoryIcon)
+    }
+
+    /// `accessoryIcon` returns nil for TOTP items.
+    func test_accessoryIcon_totp() {
+        let item = VaultListItem.fixtureTOTP(totp: .fixture())
+        XCTAssertNil(item.accessoryIcon)
+    }
+
+    /// `accessoryIcon` returns nil for group items that don't require Premium.
+    func test_accessoryIcon_group_noPremiumRequired() {
+        let item = VaultListItem(id: "test", hasPremium: false, itemType: .group(.login, 0))
+        XCTAssertNil(item.accessoryIcon)
+    }
+
+    /// `accessoryIcon` returns locked icon for archive group when Premium is required.
+    func test_accessoryIcon_archiveGroup_premiumRequired() {
+        let item = VaultListItem(id: "test", hasPremium: false, itemType: .group(.archive, 0))
+        XCTAssertEqual(item.accessoryIcon?.name, SharedAsset.Icons.locked24.name)
+    }
+
+    /// `accessoryIcon` returns nil for archive group when user has archived items (no Premium required).
+    func test_accessoryIcon_archiveGroup_hasArchivedItems() {
+        let item = VaultListItem(id: "test", hasPremium: false, itemType: .group(.archive, 3))
+        XCTAssertNil(item.accessoryIcon)
+    }
+
+    /// `accessoryIcon` returns nil for archive group when user has Premium.
+    func test_accessoryIcon_archiveGroup_hasPremium() {
+        let item = VaultListItem(id: "test", hasPremium: true, itemType: .group(.archive, 5))
+        XCTAssertNil(item.accessoryIcon)
+    }
+
+    /// `init` returns the expected value.
+    func test_init() {
+        XCTAssertNil(VaultListItem(cipherListView: .fixture(id: nil)))
+        XCTAssertNotNil(VaultListItem(cipherListView: .fixture(id: ":)")))
+    }
+
+    /// `init` returns the expected value when using the one that takes `fido2CredentialAutofillView`.
+    func test_init_fido2CredentialAutofillView() {
+        XCTAssertNil(
+            VaultListItem(
+                cipherListView: .fixture(id: nil),
+                fido2CredentialAutofillView: .fixture(),
+            ),
+        )
+        XCTAssertNil(
+            VaultListItem(
+                cipherListView: .fixture(id: ":)", type: .card(.init(brand: nil))),
+                fido2CredentialAutofillView: .fixture(),
+            ),
+        )
+        XCTAssertNil(
+            VaultListItem(
+                cipherListView: .fixture(id: ":)", type: .identity),
+                fido2CredentialAutofillView: .fixture(),
+            ),
+        )
+        XCTAssertNil(
+            VaultListItem(
+                cipherListView: .fixture(id: ":)", type: .secureNote),
+                fido2CredentialAutofillView: .fixture(),
+            ),
+        )
+        XCTAssertNotNil(
+            VaultListItem(
+                cipherListView: .fixture(id: ":)", login: .fixture()),
+                fido2CredentialAutofillView: .fixture(),
+            ),
+        )
+    }
+
+    /// `init(id:itemType:)` sets hasPremium to false by default.
+    func test_init_itemType_hasPremiumDefaultsFalse() {
+        let item = VaultListItem(id: "test", itemType: .group(.archive, 5))
+        XCTAssertEqual(item.hasPremium, false)
+    }
+
+    /// `fido2CredentialRpId` returns expected value.
+    func test_fido2CredentialRpId() {
+        XCTAssertEqual(
+            VaultListItem(
+                cipherListView: .fixture(
+                    login: .fixture(
+                        fido2Credentials: [
+                            .fixture(),
+                        ],
+                        username: FakeData.username1,
+                    ),
+                    name: "MyApp",
+                ),
+                fido2CredentialAutofillView: .fixture(
+                    userNameForUi: FakeData.username2,
+                ),
+            )!.fido2CredentialRpId,
+            BitwardenSdk.Fido2CredentialAutofillView.defaultRpId,
+        )
+        XCTAssertNil(
+            VaultListItem(cipherListView: .fixture(
+                login: .fixture(
+                    fido2Credentials: [
+                        .fixture(userName: FakeData.username2),
+                    ],
+                    username: FakeData.email1,
+                ),
+                name: "MyApp",
+            ))!.fido2CredentialRpId,
+        )
+        XCTAssertNil(
+            VaultListItem(cipherListView: .fixture(
+                login: .fixture(
+                    username: FakeData.email1,
+                ),
+                name: "MyApp",
+            ))!.fido2CredentialRpId,
+        )
+        XCTAssertNil(
+            VaultListItem(
+                id: "1",
+                itemType: .group(.card, 1),
+            ).fido2CredentialRpId,
+        )
+        XCTAssertNil(
+            VaultListItem(
+                id: "1",
+                itemType: .totp(name: "test", totpModel: VaultListTOTP.fixture()),
+            ).fido2CredentialRpId,
+        )
+    }
+
+    /// `icon` returns the expected value.
+    func test_icon() { // swiftlint:disable:this function_body_length
+        XCTAssertEqual(
+            VaultListItem(cipherListView: .fixture(type: .bankAccount))?.icon.name,
+            SharedAsset.Icons.bankAccount24.name,
+        )
+        XCTAssertEqual(
+            VaultListItem(cipherListView: .fixture(type: .card(.init(brand: nil))))?.icon.name,
+            SharedAsset.Icons.card24.name,
+        )
+        XCTAssertEqual(
+            VaultListItem(cipherListView: .fixture(type: .driversLicense))?.icon.name,
+            SharedAsset.Icons.idCard24.name,
+        )
+        XCTAssertEqual(
+            VaultListItem(cipherListView: .fixture(type: .identity))?.icon.name,
+            SharedAsset.Icons.idCard24.name,
+        )
+        XCTAssertEqual(
+            VaultListItem(cipherListView: .fixture(login: .fixture()))?.icon.name,
+            SharedAsset.Icons.globe24.name,
+        )
+        XCTAssertEqual(
+            VaultListItem(
+                cipherListView: .fixture(login: .fixture()),
+                fido2CredentialAutofillView: .fixture(),
+            )?.icon.name,
+            SharedAsset.Icons.passkey24.name,
+        )
+        XCTAssertEqual(
+            VaultListItem(cipherListView: .fixture(type: .passport))?.icon.name,
+            SharedAsset.Icons.idCard24.name,
+        )
+        XCTAssertEqual(
+            VaultListItem(cipherListView: .fixture(type: .secureNote))?.icon.name,
+            SharedAsset.Icons.file24.name,
+        )
+        XCTAssertEqual(
+            VaultListItem(cipherListView: .fixture(type: .sshKey))?.icon.name,
+            SharedAsset.Icons.key24.name,
+        )
+
+        XCTAssertEqual(
+            VaultListItem(id: "", itemType: .group(.bankAccount, 1)).icon.name,
+            SharedAsset.Icons.bankAccount24.name,
+        )
+        XCTAssertEqual(
+            VaultListItem(id: "", itemType: .group(.card, 1)).icon.name,
+            SharedAsset.Icons.card24.name,
+        )
+        XCTAssertEqual(
+            VaultListItem(id: "", itemType: .group(.collection(id: "", name: "", organizationId: "1"), 1)).icon.name,
+            SharedAsset.Icons.collections24.name,
+        )
+        XCTAssertEqual(
+            VaultListItem(id: "", itemType: .group(.folder(id: "", name: ""), 1)).icon.name,
+            SharedAsset.Icons.folder24.name,
+        )
+        XCTAssertEqual(
+            VaultListItem(id: "", itemType: .group(.driversLicense, 1)).icon.name,
+            SharedAsset.Icons.idCard24.name,
+        )
+        XCTAssertEqual(
+            VaultListItem(id: "", itemType: .group(.identity, 1)).icon.name,
+            SharedAsset.Icons.idCard24.name,
+        )
+        XCTAssertEqual(
+            VaultListItem(id: "", itemType: .group(.login, 1)).icon.name,
+            SharedAsset.Icons.globe24.name,
+        )
+        XCTAssertEqual(
+            VaultListItem(id: "", itemType: .group(.passport, 1)).icon.name,
+            SharedAsset.Icons.idCard24.name,
+        )
+        XCTAssertEqual(
+            VaultListItem(id: "", itemType: .group(.secureNote, 1)).icon.name,
+            SharedAsset.Icons.file24.name,
+        )
+        XCTAssertEqual(
+            VaultListItem(id: "", itemType: .group(.sshKey, 1)).icon.name,
+            SharedAsset.Icons.key24.name,
+        )
+        XCTAssertEqual(
+            VaultListItem(id: "", itemType: .group(.totp, 1)).icon.name,
+            SharedAsset.Icons.clock24.name,
+        )
+        XCTAssertEqual(
+            VaultListItem(id: "", itemType: .group(.archive, 1)).icon.name,
+            SharedAsset.Icons.archive24.name,
+        )
+        XCTAssertEqual(
+            VaultListItem(id: "", itemType: .group(.trash, 1)).icon.name,
+            SharedAsset.Icons.trash24.name,
+        )
+
+        XCTAssertEqual(
+            VaultListItem.fixtureTOTP(totp: .fixture()).icon.name,
+            SharedAsset.Icons.clock24.name,
+        )
+    }
+
+    /// `getter:iconAccessibilityId` gets the appropriate id for each icon.
+    func test_iconAccessibilityId() {
+        XCTAssertEqual(
+            VaultListItem(cipherListView: .fixture(type: .bankAccount))?.iconAccessibilityId,
+            "BankAccountCipherIcon",
+        )
+        XCTAssertEqual(
+            VaultListItem(cipherListView: .fixture(type: .card(.init(brand: nil))))?.iconAccessibilityId,
+            "CardCipherIcon",
+        )
+        XCTAssertEqual(
+            VaultListItem(cipherListView: .fixture(type: .driversLicense))?.iconAccessibilityId,
+            "DriverLicenseCipherIcon",
+        )
+        XCTAssertEqual(
+            VaultListItem(cipherListView: .fixture(type: .identity))?.iconAccessibilityId,
+            "IdentityCipherIcon",
+        )
+        XCTAssertEqual(
+            VaultListItem(cipherListView: .fixture(login: .fixture()))?.iconAccessibilityId,
+            "LoginCipherIcon",
+        )
+        XCTAssertEqual(
+            VaultListItem(
+                cipherListView: .fixture(login: .fixture()),
+                fido2CredentialAutofillView: .fixture(),
+            )?.iconAccessibilityId,
+            "LoginCipherIcon",
+        )
+        XCTAssertEqual(
+            VaultListItem(cipherListView: .fixture(type: .passport))?.iconAccessibilityId,
+            "PassportCipherIcon",
+        )
+        XCTAssertEqual(
+            VaultListItem(cipherListView: .fixture(type: .secureNote))?.iconAccessibilityId,
+            "SecureNoteCipherIcon",
+        )
+        XCTAssertEqual(
+            VaultListItem(cipherListView: .fixture(type: .sshKey))?.iconAccessibilityId,
+            "SSHKeyCipherIcon",
+        )
+
+        XCTAssertEqual(
+            VaultListItem(id: "", itemType: .group(.card, 1)).iconAccessibilityId,
+            "",
+        )
+
+        XCTAssertEqual(
+            VaultListItem.fixtureTOTP(totp: .fixture()).iconAccessibilityId,
+            "",
+        )
+    }
+
+    /// `getter:vaultItemAccessibilityId` gets the appropriate id for each vault item.
+    func test_vaultItemAccessibilityId() { // swiftlint:disable:this function_body_length
+        XCTAssertEqual(
+            VaultListItem(cipherListView: .fixture(login: .fixture()))?.vaultItemAccessibilityId,
+            "CipherCell",
+        )
+        XCTAssertEqual(
+            VaultListItem(cipherListView: .fixture(type: .card(.init(brand: nil))))?.vaultItemAccessibilityId,
+            "CipherCell",
+        )
+        XCTAssertEqual(
+            VaultListItem(cipherListView: .fixture(type: .identity))?.vaultItemAccessibilityId,
+            "CipherCell",
+        )
+        XCTAssertEqual(
+            VaultListItem(cipherListView: .fixture(type: .secureNote))?.vaultItemAccessibilityId,
+            "CipherCell",
+        )
+        XCTAssertEqual(
+            VaultListItem(cipherListView: .fixture(type: .sshKey))?.vaultItemAccessibilityId,
+            "CipherCell",
+        )
+
+        XCTAssertEqual(
+            VaultListItem.fixtureTOTP(totp: .fixture()).vaultItemAccessibilityId,
+            "TOTPCell",
+        )
+
+        XCTAssertEqual(
+            VaultListItem(id: "", itemType: .group(.collection(id: "", name: "", organizationId: "1"), 1))
+                .vaultItemAccessibilityId,
+            "CollectionCell",
+        )
+        XCTAssertEqual(
+            VaultListItem(id: "", itemType: .group(.folder(id: "", name: ""), 1)).vaultItemAccessibilityId,
+            "FolderCell",
+        )
+
+        XCTAssertEqual(
+            VaultListItem(id: "", itemType: .group(.login, 1)).vaultItemAccessibilityId,
+            "LoginCell",
+        )
+        XCTAssertEqual(
+            VaultListItem(id: "", itemType: .group(.bankAccount, 1)).vaultItemAccessibilityId,
+            "BankAccountCell",
+        )
+        XCTAssertEqual(
+            VaultListItem(id: "", itemType: .group(.card, 1)).vaultItemAccessibilityId,
+            "CardCell",
+        )
+        XCTAssertEqual(
+            VaultListItem(id: "", itemType: .group(.driversLicense, 1)).vaultItemAccessibilityId,
+            "DriversLicenseCell",
+        )
+        XCTAssertEqual(
+            VaultListItem(id: "", itemType: .group(.identity, 1)).vaultItemAccessibilityId,
+            "IdentityCell",
+        )
+        XCTAssertEqual(
+            VaultListItem(id: "", itemType: .group(.passport, 1)).vaultItemAccessibilityId,
+            "PassportCell",
+        )
+        XCTAssertEqual(
+            VaultListItem(id: "", itemType: .group(.secureNote, 1)).vaultItemAccessibilityId,
+            "SecureNoteCell",
+        )
+        XCTAssertEqual(
+            VaultListItem(id: "", itemType: .group(.sshKey, 1)).vaultItemAccessibilityId,
+            "SSHKeyCell",
+        )
+        XCTAssertEqual(
+            VaultListItem(id: "", itemType: .group(.totp, 1)).vaultItemAccessibilityId,
+            "TOTPCell",
+        )
+        XCTAssertEqual(
+            VaultListItem(id: "", itemType: .group(.noFolder, 1)).vaultItemAccessibilityId,
+            "ItemFilterCell",
+        )
+
+        XCTAssertEqual(
+            VaultListItem(id: "", itemType: .group(.archive, 1)).vaultItemAccessibilityId,
+            "ArchiveCell",
+        )
+        XCTAssertEqual(
+            VaultListItem(id: "", itemType: .group(.trash, 1)).vaultItemAccessibilityId,
+            "TrashCell",
+        )
+    }
+
+    /// `sortValue` returns the expected value.
+    func test_sortValue() {
+        subject = .fixture(cipherListView: .fixture(name: "CipherName"))
+        XCTAssertEqual(subject.sortValue, "CipherName")
+
+        subject = .fixtureGroup()
+        XCTAssertEqual(subject.sortValue, "")
+
+        subject = .fixtureTOTP(totp: .fixture())
+        XCTAssertEqual(subject.sortValue, "Name123")
+    }
+
+    /// `shouldShowFido2CredentialRpId` returns expected value.
+    func test_shouldShowFido2CredentialRpId() {
+        XCTAssertTrue(
+            VaultListItem(cipherListView: .fixture(
+                login: .fixture(
+                    fido2Credentials: [
+                        .fixture(userName: FakeData.username2),
+                    ],
+                    username: FakeData.email1,
+                ),
+                name: "MyApp",
+            ), fido2CredentialAutofillView: .fixture())!.shouldShowFido2CredentialRpId,
+        )
+        XCTAssertFalse(
+            VaultListItem(cipherListView: .fixture(
+                login: .fixture(
+                    fido2Credentials: [
+                        .fixture(userName: FakeData.username2),
+                    ],
+                    username: FakeData.email1,
+                ),
+                name: BitwardenSdk.Fido2CredentialAutofillView.defaultRpId,
+            ), fido2CredentialAutofillView: .fixture())!.shouldShowFido2CredentialRpId,
+        )
+        XCTAssertFalse(
+            VaultListItem(cipherListView: .fixture(
+                login: .fixture(
+                    fido2Credentials: [
+                        .fixture(rpId: "", userName: FakeData.username2),
+                    ],
+                    username: FakeData.email1,
+                ),
+                name: BitwardenSdk.Fido2CredentialAutofillView.defaultRpId,
+            ), fido2CredentialAutofillView: .fixture())!.shouldShowFido2CredentialRpId,
+        )
+        XCTAssertFalse(
+            VaultListItem(cipherListView: .fixture(
+                login: .fixture(
+                    username: FakeData.email1,
+                ),
+                name: BitwardenSdk.Fido2CredentialAutofillView.defaultRpId,
+            ))!.shouldShowFido2CredentialRpId,
+        )
+        XCTAssertFalse(
+            VaultListItem(id: "1", itemType: .group(.card, 1)).shouldShowFido2CredentialRpId,
+        )
+        XCTAssertFalse(
+            VaultListItem(
+                id: "1",
+                itemType: .totp(name: "test", totpModel: VaultListTOTP.fixture()),
+            ).shouldShowFido2CredentialRpId,
+        )
+    }
+
+    /// `subtitle` returns the expected value.
+    func test_subtitle() {
+        XCTAssertEqual(
+            VaultListItem(cipherListView: .fixture(
+                subtitle: "Mom's Credit Card, *7890",
+                type: .card(.init(brand: nil)),
+            ))?.subtitle,
+            "Mom's Credit Card, *7890",
+        )
+
+        XCTAssertEqual(
+            VaultListItem(cipherListView: .fixture(
+                subtitle: "First Last",
+                type: .identity,
+            ))?.subtitle,
+            "First Last",
+        )
+
+        XCTAssertEqual(
+            VaultListItem(cipherListView: .fixture(
+                login: .fixture(username: FakeData.email1),
+                subtitle: FakeData.email1,
+            ))?.subtitle,
+            FakeData.email1,
+        )
+
+        XCTAssertEqual(VaultListItem(cipherListView: .fixture(type: .secureNote))?.subtitle, "")
+        XCTAssertEqual(VaultListItem(cipherListView: .fixture(type: .sshKey))?.subtitle, "")
+
+        XCTAssertNil(VaultListItem(id: "1", itemType: .group(.card, 1)).subtitle)
+        XCTAssertNil(VaultListItem.fixtureTOTP(totp: .fixture()).subtitle)
+    }
+
+    /// `subtitle` returns the expected value when in Fido2 credential.
+    func test_subtitle_fido2() {
+        XCTAssertEqual(
+            VaultListItem(cipherListView: .fixture(
+                login: .fixture(
+                    fido2Credentials: [
+                        .fixture(),
+                    ],
+                    username: FakeData.email1,
+                ),
+            ), fido2CredentialAutofillView: .fixture(userNameForUi: FakeData.username2))?.subtitle,
+            FakeData.username2,
+        )
+    }
+
+    /// `subtitle` returns Premium subscription required for archive group when Premium is required.
+    func test_subtitle_archiveGroup_premiumRequired() {
+        let item = VaultListItem(id: "test", hasPremium: false, itemType: .group(.archive, 0))
+        XCTAssertEqual(item.subtitle, Localizations.premiumSubscriptionRequired)
+    }
+
+    /// `subtitle` returns nil for archive group when user has archived items.
+    func test_subtitle_archiveGroup_hasArchivedItems() {
+        let item = VaultListItem(id: "test", hasPremium: false, itemType: .group(.archive, 3))
+        XCTAssertNil(item.subtitle)
+    }
+
+    /// `subtitle` returns nil for archive group when user has Premium.
+    func test_subtitle_archiveGroup_hasPremium() {
+        let item = VaultListItem(id: "test", hasPremium: true, itemType: .group(.archive, 5))
+        XCTAssertNil(item.subtitle)
+    }
+
+    /// `subtitle` returns nil for non-archive group items.
+    func test_subtitle_nonArchiveGroup() {
+        let item = VaultListItem(id: "test", hasPremium: false, itemType: .group(.trash, 0))
+        XCTAssertNil(item.subtitle)
+    }
+}
+
+private extension BitwardenSdk.LoginView {
+    static func usernameFixture() -> BitwardenSdk.LoginView {
+        .fixture(username: FakeData.email1)
+    }
+} // swiftlint:disable:this file_length

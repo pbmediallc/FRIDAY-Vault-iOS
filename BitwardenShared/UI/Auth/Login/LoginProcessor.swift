@@ -1,0 +1,190 @@
+import AuthenticationServices
+import BitwardenKit
+import BitwardenResources
+import BitwardenSdk
+import Foundation
+
+// MARK: - LoginProcessor
+
+/// The processor used to manage state and handle actions for the login screen.
+///
+class LoginProcessor: StateProcessor<LoginState, LoginAction, LoginEffect> {
+    // MARK: Types
+
+    typealias Services = HasAppIDService
+        & HasAuthRepository
+        & HasAuthService
+        & HasConfigService
+        & HasDeviceAPIService
+        & HasErrorReporter
+        & HasPolicyService
+
+    // MARK: Private Properties
+
+    /// The `Coordinator` that handles navigation.
+    private var coordinator: AnyCoordinator<AuthRoute, AuthEvent>
+
+    /// A flag indicating if this is the first time that the view has appeared.
+    ///
+    /// This flag keeps us from making the known device call multiple times as the user navigates away from,
+    /// and back to the same instance of `LoginView`.
+    private var isFirstAppeared = true
+
+    /// The services used by this processor.
+    private var services: Services
+
+    // MARK: Initialization
+
+    /// Creates a new `LoginProcessor`.
+    ///
+    /// - Parameters:
+    ///   - coordinator: The coordinator that handles navigation.
+    ///   - state: The initial state of the processor.
+    ///
+    init(
+        coordinator: AnyCoordinator<AuthRoute, AuthEvent>,
+        services: Services,
+        state: LoginState,
+    ) {
+        self.coordinator = coordinator
+        self.services = services
+        super.init(state: state)
+    }
+
+    // MARK: Methods
+
+    override func perform(_ effect: LoginEffect) async {
+        switch effect {
+        case .appeared:
+            await refreshKnownDevice()
+        case .loginWithMasterPasswordPressed:
+            await loginWithMasterPassword()
+        }
+    }
+
+    override func receive(_ action: LoginAction) {
+        switch action {
+        case .enterpriseSingleSignOnPressed:
+            coordinator.navigate(to: .enterpriseSingleSignOn(email: state.username))
+        case .getMasterPasswordHintPressed:
+            coordinator.navigate(to: .masterPasswordHint(username: state.username))
+        case .loginWithDevicePressed:
+            coordinator.navigate(to: .loginWithDevice(
+                email: state.username,
+                authRequestType: AuthRequestType.authenticateAndUnlock,
+                isAuthenticated: false,
+            ))
+        case let .masterPasswordChanged(newValue):
+            state.masterPassword = newValue
+        case .notYouPressed:
+            coordinator.navigate(to: .landing)
+        case .revealMasterPasswordFieldPressed:
+            state.isMasterPasswordRevealed.toggle()
+        }
+    }
+
+    // MARK: Private Methods
+
+    /// Attempts to log the user in with the email address and password values found in `state`.
+    ///
+    ///
+    private func loginWithMasterPassword() async {
+        guard !state.isLoggingIn else { return }
+
+        state.isLoggingIn = true
+        let masterPassword = state.masterPassword
+        let username = state.username
+        let isNewAccount = state.isNewAccount
+        defer {
+            coordinator.hideLoadingOverlay()
+            state.isLoggingIn = false
+        }
+
+        do {
+            try EmptyInputValidator(fieldName: Localizations.masterPassword)
+                .validate(input: masterPassword)
+            coordinator.showLoadingOverlay(title: Localizations.loggingIn)
+
+            // Login.
+            try await services.authService.loginWithMasterPassword(
+                masterPassword,
+                username: username,
+                isNewAccount: isNewAccount,
+            )
+
+            // Unlock the vault.
+            try await services.authRepository.unlockVaultWithPassword(password: masterPassword)
+            // Complete the login flow.
+            coordinator.hideLoadingOverlay()
+            await coordinator.handleEvent(.didCompleteAuth)
+        } catch let error as InputValidationError {
+            coordinator.showAlert(.inputValidationAlert(error: error))
+        } catch let error as IdentityTokenRequestError {
+            switch error {
+            case let .twoFactorRequired(authMethodsData, _, _):
+                coordinator.navigate(
+                    to: .twoFactor(username, .password(masterPassword), authMethodsData, nil),
+                )
+            case .twoFactorProvidersNotConfigured:
+                await handleErrorResponse(error)
+            case .newDeviceNotVerified:
+                coordinator.navigate(
+                    to: .twoFactor(
+                        username,
+                        .password(masterPassword),
+                        AuthMethodsData(email: Email(email: username)),
+                        nil,
+                        true,
+                    ),
+                )
+            case .encryptionKeyMigrationRequired:
+                coordinator.showAlert(.encryptionKeyMigrationRequiredAlert(environmentUrl: state.serverURLString))
+            }
+        } catch {
+            await handleErrorResponse(error)
+        }
+    }
+
+    /// Refreshes the value for known device from the API, and then updates the state to show or hide the
+    /// "Login with known device" button based on that value.
+    ///
+    private func refreshKnownDevice() async {
+        guard isFirstAppeared else { return }
+        coordinator.showLoadingOverlay(title: Localizations.loading)
+        defer {
+            isFirstAppeared = false
+            coordinator.hideLoadingOverlay()
+        }
+
+        do {
+            let deviceIdentifier = await services.appIDService.getOrCreateAppID()
+            let isKnownDevice = try await services.deviceAPIService.knownDevice(
+                email: state.username,
+                deviceIdentifier: deviceIdentifier,
+            )
+            state.isLoginWithDeviceVisible = isKnownDevice
+        } catch {
+            services.errorReporter.log(error: error)
+        }
+    }
+
+    /// Handles network error responses.
+    ///
+    /// Determines whether the Bitwarden server is official or unofficial and passes this information
+    /// along with the error to the coordinator to display an appropriate alert on the main thread.
+    /// The error is also logged using the error reporter.
+    ///
+    /// - Parameter error: The error received from the network request.
+    ///
+    private func handleErrorResponse(_ error: Error) async {
+        services.errorReporter.log(error: error)
+        let serverConfig = await services.configService.getConfig(isPreAuth: true)
+        let isOfficialBitwardenServer = serverConfig?.isOfficialBitwardenServer() ?? true
+        coordinator.showAlert(
+            .networkResponseError(
+                error,
+                isOfficialBitwardenServer: isOfficialBitwardenServer,
+            ),
+        )
+    }
+}

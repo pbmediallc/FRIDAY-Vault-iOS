@@ -1,0 +1,46 @@
+import BitwardenSdk
+import Networking
+
+/// Errors thrown by `UpdateCipherCollectionsRequest`.
+///
+enum UpdateCipherCollectionsRequestError: Error {
+    /// The cipher was missing an ID.
+    case missingCipherId
+}
+
+/// A request model for updating the collections a cipher belongs to within an organization.
+///
+struct UpdateCipherCollectionsRequest: Request {
+    typealias Response = UpdateCipherCollectionsResponseModel
+
+    // MARK: Properties
+
+    /// The body of the request.
+    var body: CipherCollectionsRequestModel? {
+        requestModel
+    }
+
+    /// The cipher's identifier.
+    let id: String
+
+    /// The HTTP method for this request.
+    let method = HTTPMethod.put
+
+    /// The URL path for this request.
+    var path: String { "/ciphers/\(id)/collections_v2" }
+
+    /// The request details to include in the body of the request.
+    let requestModel: CipherCollectionsRequestModel
+
+    // MARK: Initialization
+
+    /// Initialize an `UpdateCipherCollectionsRequest` for a `Cipher`.
+    ///
+    /// - Parameter cipher: The `Cipher` whose collection assignments to update.
+    ///
+    init(cipher: Cipher) throws {
+        guard let id = cipher.id else { throw UpdateCipherCollectionsRequestError.missingCipherId }
+        self.id = id
+        requestModel = CipherCollectionsRequestModel(collectionIds: cipher.collectionIds)
+    }
+}

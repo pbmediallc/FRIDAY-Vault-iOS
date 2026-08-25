@@ -1,0 +1,129 @@
+// swiftlint:disable:this file_name
+import BitwardenKitMocks
+import BitwardenResources
+import ViewInspectorTestHelpers
+import XCTest
+
+@testable import BitwardenKit
+
+// MARK: - DebugMenuViewTests
+
+class DebugMenuViewTests: BitwardenTestCase {
+    // MARK: Properties
+
+    var processor: MockProcessor<DebugMenuState, DebugMenuAction, DebugMenuEffect>!
+    var subject: DebugMenuView!
+
+    // MARK: Setup & Teardown
+
+    override func setUp() {
+        super.setUp()
+
+        processor = MockProcessor(
+            state: DebugMenuState(
+                featureFlags: [
+                    .init(
+                        feature: .testFeatureFlag,
+                        isEnabled: false,
+                    ),
+                ],
+            ),
+        )
+        let store = Store(processor: processor)
+
+        subject = DebugMenuView(store: store)
+    }
+
+    override func tearDown() {
+        super.tearDown()
+
+        processor = nil
+        subject = nil
+    }
+
+    // MARK: Tests
+
+    /// Tapping the add fill assist rule button dispatches the `.addFillAssistRuleTapped` action.
+    @MainActor
+    func test_addFillAssistRule_tap() throws {
+        let button = try subject.inspect().find(button: "Add fill assist rule")
+        try button.tap()
+        XCTAssertEqual(processor.dispatchedActions.last, .addFillAssistRuleTapped)
+    }
+
+    /// Tapping the clear masterPasswordUnlock button sends the correct effect.
+    @MainActor
+    func test_clearMasterPasswordUnlock_tapped() async throws {
+        let button = try subject.inspect().find(asyncButton: Localizations.clearMasterPasswordUnlock)
+        try await button.tap()
+        XCTAssertEqual(processor.effects.last, .clearMasterPasswordUnlock)
+    }
+
+    /// Test that the clear SSO Cookies button sends the correct effect.
+    @MainActor
+    func test_clearSSOCookies_tapped() async throws {
+        let button = try subject.inspect().find(asyncButton: Localizations.clearSsoCookies)
+        try await button.tap()
+        XCTAssertEqual(processor.effects.last, .clearSsoCookies)
+    }
+
+    /// Tapping the close button dispatches the `.dismissTapped` action.
+    @MainActor
+    func test_closeButton_tap() throws {
+        let button = try subject.inspect().findCloseToolbarButton()
+        try button.tap()
+        XCTAssertEqual(processor.dispatchedActions.last, .dismissTapped)
+    }
+
+    /// Tapping the copy user ID button dispatches the `.copyUserID` action.
+    @MainActor
+    func test_copyUserID_tap() throws {
+        let button = try subject.inspect().find(button: Localizations.copyUserID)
+        try button.tap()
+        XCTAssertEqual(processor.dispatchedActions.last, .copyUserID)
+    }
+
+    /// Tests that the toggle fires off the correct effect.
+    @MainActor
+    func test_featureFlag_toggled() async throws {
+        if #available(iOS 16.0, macOS 13.0, tvOS 16.0, watchOS 9.0, *) {
+            throw XCTSkip("Unable to run test in iOS 16, keep an eye on ViewInspector to see if it gets updated.")
+        }
+        let featureFlagName = FeatureFlag.testFeatureFlag.rawValue
+        let toggle = try subject.inspect().find(viewWithAccessibilityIdentifier: featureFlagName).toggle()
+        try toggle.tap()
+        XCTAssertEqual(processor.effects.last, .toggleFeatureFlag(featureFlagName, true))
+    }
+
+    /// Tapping the generate crash button dispatches the `.generateCrash` action.
+    @MainActor
+    func test_generateCrash_tap() throws {
+        let button = try subject.inspect().find(button: Localizations.generateCrash)
+        try button.tap()
+        XCTAssertEqual(processor.dispatchedActions.last, .generateCrash)
+    }
+
+    /// Tapping the generate error report button dispatches the `.generateErrorReport` action.
+    @MainActor
+    func test_generateErrorReport_tap() throws {
+        let button = try subject.inspect().find(button: Localizations.generateErrorReport)
+        try button.tap()
+        XCTAssertEqual(processor.dispatchedActions.last, .generateErrorReport)
+    }
+
+    /// Tapping the generate SDK error report button dispatches the `.generateSdkErrorReport` action.
+    @MainActor
+    func test_generateSdkErrorReport_tap() throws {
+        let button = try subject.inspect().find(button: Localizations.generateSdkErrorReport)
+        try button.tap()
+        XCTAssertEqual(processor.dispatchedActions.last, .generateSdkErrorReport)
+    }
+
+    /// Test that the refresh button sends the correct effect.
+    @MainActor
+    func disabletest_refreshFeatureFlags_tapped() async throws {
+        let button = try subject.inspect().find(asyncButtonWithAccessibilityLabel: "RefreshFeatureFlagsButton")
+        try await button.tap()
+        XCTAssertEqual(processor.effects.last, .refreshFeatureFlags)
+    }
+}
