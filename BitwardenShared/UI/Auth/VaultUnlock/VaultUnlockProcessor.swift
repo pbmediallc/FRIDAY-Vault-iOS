@@ -240,6 +240,10 @@ class VaultUnlockProcessor: StateProcessor<
                 try await services.authRepository.unlockVaultWithPIN(pin: state.pin)
             }
 
+            // Hide the window-level overlay before completing auth. In an app extension,
+            // didCompleteAuth replaces the auth child coordinator; once detached, that
+            // coordinator can no longer find the overlay that it added to the window.
+            coordinator.hideLoadingOverlay()
             await coordinator.handleEvent(.didCompleteAuth)
             state.unsuccessfulUnlockAttemptsCount = 0
             await services.userSessionStateService.setUnsuccessfulUnlockAttempts(0)
@@ -272,6 +276,10 @@ class VaultUnlockProcessor: StateProcessor<
 
         do {
             try await services.authRepository.unlockVaultWithBiometrics()
+            // Hide the window-level overlay before completing auth. In an app extension,
+            // didCompleteAuth replaces the auth child coordinator; once detached, that
+            // coordinator can no longer find the overlay that it added to the window.
+            coordinator.hideLoadingOverlay()
             await coordinator.handleEvent(.didCompleteAuth)
             state.unsuccessfulUnlockAttemptsCount = 0
             await services.userSessionStateService.setUnsuccessfulUnlockAttempts(0)

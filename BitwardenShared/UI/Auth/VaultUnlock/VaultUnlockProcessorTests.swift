@@ -131,11 +131,17 @@ class VaultUnlockProcessorTests: BitwardenTestCase { // swiftlint:disable:this t
         biometricsRepository.getBiometricUnlockStatusReturnValue = .available(.faceID, enabled: true)
         authRepository.unlockVaultWithBiometricsResult = .success(())
         subject.shouldAttemptAutomaticBiometricUnlock = true
+        var overlayShownOnAuthCompletion: Bool?
+        coordinator.handleEventHandler = { [weak coordinator] event, _ in
+            guard event == .didCompleteAuth else { return }
+            overlayShownOnAuthCompletion = coordinator?.isLoadingOverlayShowing
+        }
 
         await subject.perform(.appeared)
 
         XCTAssertTrue(authRepository.unlockVaultWithBiometricsCalled)
         XCTAssertEqual(coordinator.events.last, .didCompleteAuth)
+        XCTAssertEqual(overlayShownOnAuthCompletion, false)
         XCTAssertEqual(coordinator.loadingOverlaysShown, [.init(title: Localizations.loading)])
         XCTAssertFalse(coordinator.isLoadingOverlayShowing)
         XCTAssertFalse(subject.state.isUnlocking)
@@ -463,6 +469,11 @@ class VaultUnlockProcessorTests: BitwardenTestCase { // swiftlint:disable:this t
         stateService.pinProtectedUserKeyValue["1"] = "123"
         stateService.encryptedPinByUserId["1"] = "123"
         subject.state.masterPassword = "password"
+        var overlayShownOnAuthCompletion: Bool?
+        coordinator.handleEventHandler = { [weak coordinator] event, _ in
+            guard event == .didCompleteAuth else { return }
+            overlayShownOnAuthCompletion = coordinator?.isLoadingOverlayShowing
+        }
 
         await subject.perform(.unlockVault)
 
@@ -470,6 +481,7 @@ class VaultUnlockProcessorTests: BitwardenTestCase { // swiftlint:disable:this t
         XCTAssertEqual(authRepository.encryptedPin, "123")
         XCTAssertEqual(authRepository.unlockVaultPassword, "password")
         XCTAssertEqual(coordinator.events.last, .didCompleteAuth)
+        XCTAssertEqual(overlayShownOnAuthCompletion, false)
         XCTAssertEqual(coordinator.loadingOverlaysShown, [.init(title: Localizations.loading)])
         XCTAssertFalse(coordinator.isLoadingOverlayShowing)
         XCTAssertFalse(subject.state.isUnlocking)
@@ -918,10 +930,16 @@ class VaultUnlockProcessorTests: BitwardenTestCase { // swiftlint:disable:this t
         subject.state.unsuccessfulUnlockAttemptsCount = 3
         biometricsRepository.getBiometricUnlockStatusReturnValue = .available(.faceID, enabled: true)
         authRepository.unlockVaultWithBiometricsResult = .success(())
+        var overlayShownOnAuthCompletion: Bool?
+        coordinator.handleEventHandler = { [weak coordinator] event, _ in
+            guard event == .didCompleteAuth else { return }
+            overlayShownOnAuthCompletion = coordinator?.isLoadingOverlayShowing
+        }
 
         await subject.perform(.unlockVaultWithBiometrics)
         let event = try XCTUnwrap(coordinator.events.last)
         XCTAssertEqual(event, .didCompleteAuth)
+        XCTAssertEqual(overlayShownOnAuthCompletion, false)
         XCTAssertEqual(0, subject.state.unsuccessfulUnlockAttemptsCount)
         XCTAssertEqual(coordinator.loadingOverlaysShown, [.init(title: Localizations.loading)])
         XCTAssertFalse(coordinator.isLoadingOverlayShowing)

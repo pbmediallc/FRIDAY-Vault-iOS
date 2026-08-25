@@ -12,6 +12,7 @@ public class MockCoordinator<Route, Event>: Coordinator {
     public var errorAlertsShown = [Error]()
     public var errorAlertsWithRetryShown = [(error: Error, retry: () async -> Void)]()
     public var events = [Event]()
+    public var handleEventHandler: ((Event, AnyObject?) -> Void)?
     public var isLoadingOverlayShowing = false
     public var isStarted: Bool = false
     public var loadingOverlaysShown = [LoadingOverlayState]()
@@ -21,6 +22,7 @@ public class MockCoordinator<Route, Event>: Coordinator {
     public init() {}
 
     public func handleEvent(_ event: Event, context: AnyObject?) async {
+        handleEventHandler?(event, context)
         events.append(event)
         contexts.append(context)
     }
