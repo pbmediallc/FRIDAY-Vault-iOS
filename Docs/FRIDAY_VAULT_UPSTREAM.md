@@ -31,12 +31,12 @@ source for the exact distributed build, including the build configuration and
 the F.R.I.D.A.Y.-specific modifications.
 
 The recorded corresponding-source location for F.R.I.D.A.Y. Vault
-`1.0.1 (2026082502)` is the immutable tag:
+`1.0.1 (2026082601)` is the immutable tag:
 
-<https://github.com/pbmediallc/FRIDAY-Vault-iOS/tree/v1.0.1-2026082502>
+<https://github.com/pbmediallc/FRIDAY-Vault-iOS/tree/v1.0.1-2026082601>
 
 That exact URL must resolve without authentication and expose the complete
-source tree before build `2026082502` is distributed. The stable fork repository
+source tree before build `2026082601` is distributed. The stable fork repository
 is <https://github.com/pbmediallc/FRIDAY-Vault-iOS>.
 
 ## Security boundaries of this fork

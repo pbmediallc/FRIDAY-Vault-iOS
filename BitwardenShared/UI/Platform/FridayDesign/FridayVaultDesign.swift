@@ -472,6 +472,122 @@ struct FridayVaultShieldMark: View {
 
 }
 
+// MARK: - FridayVaultProfileAvatar
+
+/// The canonical F.R.I.D.A.Y. account avatar used by every profile switcher surface.
+///
+/// Profile colors from the upstream account model are intentionally not rendered here. A single
+/// dark core, cyan edge, and restrained glow keep account identity consistent between the main
+/// app and credential-provider extension while the initials remain the identifying content.
+struct FridayVaultProfileAvatar: View {
+    // MARK: Properties
+
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
+
+    private let fontWeight: SwiftUI.Font.Weight
+    private let initials: String?
+    private let size: CGFloat
+    private let textStyle: StyleGuideFont
+
+    // MARK: View
+
+    var body: some View {
+        ZStack {
+            Circle()
+                .fill(
+                    LinearGradient(
+                        colors: [
+                            FridayVaultDesign.elevated.opacity(0.98),
+                            FridayVaultDesign.deep.opacity(0.98),
+                            FridayVaultDesign.void,
+                        ],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing,
+                    ),
+                )
+
+            if !reduceTransparency {
+                Circle()
+                    .fill(
+                        RadialGradient(
+                            colors: [
+                                FridayVaultDesign.electric.opacity(0.13),
+                                FridayVaultDesign.cyan.opacity(0.035),
+                                Color.clear,
+                            ],
+                            center: UnitPoint(x: 0.34, y: 0.22),
+                            startRadius: 0,
+                            endRadius: size * 0.64,
+                        ),
+                    )
+
+                Circle()
+                    .stroke(FridayVaultDesign.cyan.opacity(0.2), lineWidth: max(3, size * 0.11))
+                    .blur(radius: max(3, size * 0.1))
+            }
+
+            Circle()
+                .stroke(
+                    LinearGradient(
+                        colors: [FridayVaultDesign.electric, FridayVaultDesign.cyan],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing,
+                    ),
+                    lineWidth: max(1, size * 0.045),
+                )
+
+            Circle()
+                .stroke(FridayVaultDesign.electric.opacity(0.18), lineWidth: 0.75)
+                .padding(max(2.5, size * 0.09))
+
+            avatarContent
+        }
+        .frame(width: size, height: size)
+        .shadow(
+            color: reduceTransparency ? .clear : FridayVaultDesign.cyan.opacity(0.3),
+            radius: max(3, size * 0.12),
+        )
+    }
+
+    // MARK: Private views
+
+    @ViewBuilder private var avatarContent: some View {
+        if let initials, !initials.isEmpty {
+            Text(initials)
+                .tracking(size * 0.012)
+                .styleGuide(
+                    textStyle,
+                    weight: fontWeight,
+                    includeLinePadding: false,
+                    includeLineSpacing: false,
+                )
+                .foregroundStyle(FridayVaultDesign.electric)
+                .lineLimit(1)
+                .minimumScaleFactor(0.68)
+                .padding(.horizontal, size * 0.16)
+        } else {
+            SharedAsset.Icons.horizontalDots16.swiftUIImage
+                .imageStyle(.accessoryIcon16(color: FridayVaultDesign.electric))
+                .scaleEffect(size / 32)
+                .accessibilityHidden(true)
+        }
+    }
+
+    // MARK: Initialization
+
+    init(
+        initials: String?,
+        size: CGFloat = 30,
+        textStyle: StyleGuideFont = .caption2Monospaced,
+        fontWeight: SwiftUI.Font.Weight = .light,
+    ) {
+        self.initials = initials
+        self.size = size
+        self.textStyle = textStyle
+        self.fontWeight = fontWeight
+    }
+}
+
 // MARK: - FridayVaultBrandHeader
 
 /// A reusable, Dynamic Type-aware F.R.I.D.A.Y. Vault heading for authentication and privacy views.

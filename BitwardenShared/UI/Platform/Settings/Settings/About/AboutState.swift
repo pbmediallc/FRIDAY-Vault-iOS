@@ -19,7 +19,7 @@ struct AboutState {
     static let productPublisherText = "\(productName) · \(publisherName)"
 
     /// The title for the complete corresponding source of this distributed build.
-    static let fridaySourceTitle = "F.R.I.D.A.Y. Vault 1.0.1 (2026082502) · Source · GNU GPLv3"
+    static let fridaySourceTitle = "F.R.I.D.A.Y. Vault 1.0.1 (2026082601) · Source · GNU GPLv3"
 
     /// The title for the verified Bitwarden upstream source and license link.
     static let upstreamSourceTitle = "Bitwarden iOS · Upstream · GNU GPLv3"

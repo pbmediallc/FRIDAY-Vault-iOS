@@ -57,10 +57,10 @@ Xcode 26.6 selected. Use Xcode 26.5 for the reproducible release, or set
   keys. App Store Connect must therefore present its official questionnaire
   for this build. The release owner must answer the legal exemption and France
   distribution questions; do not reuse Bitwarden's compliance code.
-- Before distributing build `1.0.1 (2026082502)`, publish its complete
+- Before distributing build `1.0.1 (2026082601)`, publish its complete
   corresponding source and verify without authentication that the immutable
   tag URL resolves:
-  <https://github.com/pbmediallc/FRIDAY-Vault-iOS/tree/v1.0.1-2026082502>.
+  <https://github.com/pbmediallc/FRIDAY-Vault-iOS/tree/v1.0.1-2026082601>.
   A local Git remote or the Bitwarden upstream repository is not corresponding
   source for the F.R.I.D.A.Y. modifications.
 - App Store/TestFlight metadata is not complete yet:
@@ -118,7 +118,7 @@ Scripts/pbmedia_release.sh signing-check
 Scripts/pbmedia_release.sh archive
 Scripts/pbmedia_release.sh export
 Scripts/pbmedia_release.sh verify-ipa \
-  build/pbmedia-release/FRIDAY-Vault-1.0.1-2026082502-export/FRIDAYVault.ipa
+  build/pbmedia-release/FRIDAY-Vault-1.0.1-2026082601-export/FRIDAYVault.ipa
 ```
 
 The default outputs are versioned beneath `build/pbmedia-release/`; existing
@@ -131,12 +131,12 @@ entitlement, and all signatures. Keep the archive for symbolication and perform
 any additional product-specific inspection before upload.
 
 Upload is intentionally separate and guarded by the current build number. For
-build `2026082502`, the command is:
+build `2026082601`, the command is:
 
 ```bash
-PBMEDIA_CONFIRM_UPLOAD=UPLOAD-2026082502 \
+PBMEDIA_CONFIRM_UPLOAD=UPLOAD-2026082601 \
   Scripts/pbmedia_release.sh upload \
-  build/pbmedia-release/FRIDAY-Vault-1.0.1-2026082502-export/FRIDAYVault.ipa
+  build/pbmedia-release/FRIDAY-Vault-1.0.1-2026082601-export/FRIDAYVault.ipa
 ```
 
 Do not run the upload command until the App Store Connect app record exists,

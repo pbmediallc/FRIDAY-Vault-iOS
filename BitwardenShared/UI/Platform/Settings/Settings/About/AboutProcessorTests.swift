@@ -250,7 +250,7 @@ class AboutProcessorTests: BitwardenTestCase {
 
         XCTAssertEqual(
             subject.state.url?.absoluteString,
-            "https://github.com/pbmediallc/FRIDAY-Vault-iOS/tree/v1.0.1-2026082502",
+            "https://github.com/pbmediallc/FRIDAY-Vault-iOS/tree/v1.0.1-2026082601",
         )
     }
 
