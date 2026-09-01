@@ -140,6 +140,8 @@ final class SettingsProcessor: StateProcessor<SettingsState, SettingsAction, Set
             state.url = ExternalLinksConstants.learnMoreAboutPremium
             state.shouldShowUpgradedToPremiumActionCard = false
             Task { await services.billingService.setUpgradedToPremiumActionCardDismissed() }
+        case .organizationsPressed:
+            coordinator.navigate(to: .organizations)
         case .otherPressed:
             coordinator.navigate(to: .other)
         case .vaultPressed:

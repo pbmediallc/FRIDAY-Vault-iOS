@@ -63,8 +63,11 @@ final class SettingsCoordinator: Coordinator, HasStackNavigator { // swiftlint:d
         & PasswordAutoFillModule
         & SelectLanguageModule
 
-    typealias Services = HasASSettingsMediator
+    typealias Services = HasAPIService
+        & HasASSettingsMediator
         & HasAccountAPIService
+        & HasClientService
+        & HasSyncService
         & HasAppInfoService
         & HasAuthRepository
         & HasAuthService
@@ -196,6 +199,8 @@ final class SettingsCoordinator: Coordinator, HasStackNavigator { // swiftlint:d
             showImportLogins()
         case let .loginRequest(loginRequest):
             showLoginRequest(loginRequest, delegate: context as? LoginRequestDelegate)
+        case .organizations:
+            showOrganizations()
         case .other:
             showOtherScreen()
         case .passwordAutoFill:
@@ -224,6 +229,15 @@ final class SettingsCoordinator: Coordinator, HasStackNavigator { // swiftlint:d
     }
 
     // MARK: Private Methods
+
+    /// Shows the F.R.I.D.A.Y. organization admin console.
+    ///
+    private func showOrganizations() {
+        let view = FridayOrgHostView(services: services)
+        let viewController = UIHostingController(rootView: view)
+        viewController.navigationItem.largeTitleDisplayMode = .never
+        stackNavigator?.push(viewController, navigationTitle: "Organisationen")
+    }
 
     /// Shows the about screen.
     ///

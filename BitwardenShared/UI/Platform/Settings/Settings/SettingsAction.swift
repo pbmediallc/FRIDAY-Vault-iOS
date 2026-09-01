@@ -25,6 +25,9 @@ enum SettingsAction: Equatable {
     /// The other button was pressed.
     case otherPressed
 
+    /// The F.R.I.D.A.Y. organizations row was pressed.
+    case organizationsPressed
+
     /// The vault button was pressed.
     case vaultPressed
 }

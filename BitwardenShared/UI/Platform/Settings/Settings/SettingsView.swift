@@ -74,6 +74,7 @@ struct SettingsView: View {
                 if store.state.showPlanRow {
                     planRow
                 }
+                organizationsRow
                 appearanceRow
                 otherRow
                 aboutRow
@@ -132,6 +133,19 @@ struct SettingsView: View {
             chevron
         }
         .accessibilityIdentifier("AutofillSettingsButton")
+    }
+
+    /// The F.R.I.D.A.Y. organizations row — members, collections, access.
+    private var organizationsRow: some View {
+        SettingsListItem(
+            "Organisationen",
+            icon: SharedAsset.Icons.business16,
+        ) {
+            store.send(.organizationsPressed)
+        } trailingContent: {
+            chevron
+        }
+        .accessibilityIdentifier("OrganizationsSettingsButton")
     }
 
     /// The other settings row.

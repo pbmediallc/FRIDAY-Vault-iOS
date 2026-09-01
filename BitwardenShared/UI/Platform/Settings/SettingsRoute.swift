@@ -62,6 +62,9 @@ public enum SettingsRoute: Equatable, Hashable {
     ///
     case loginRequest(_ loginRequest: LoginRequest)
 
+    /// A route to the F.R.I.D.A.Y. organization admin console.
+    case organizations
+
     /// A route to the other view.
     case other
 
