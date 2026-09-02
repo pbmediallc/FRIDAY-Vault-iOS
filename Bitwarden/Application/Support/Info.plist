@@ -116,6 +116,8 @@
 	</array>
 	<key>CFBundleVersion</key>
 	<string>$(CURRENT_PROJECT_VERSION)</string>
+	<key>ITSAppUsesNonExemptEncryption</key>
+	<false/>
 	<key>MinimumOSVersion</key>
 	<string>15.0</string>
 	<key>NFCReaderUsageDescription</key>
