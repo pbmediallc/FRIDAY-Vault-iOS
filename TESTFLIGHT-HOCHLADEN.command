@@ -6,10 +6,10 @@
 #  Das Archiv ist schon gebaut (build/pbmedia-release/*.xcarchive).
 #  Dieses Skript exportiert es als App-Store-IPA und laedt es hoch.
 #
-#  EINMALIG erscheint beim Export ein Keychain-Dialog:
-#  „codesign moechte auf den Schluessel … zugreifen“ — das ist der
-#  private Schluessel des Verteilungszertifikats vom 29.08.
-#  Dort „Immer erlauben“ klicken. Danach fragt kein Lauf mehr.
+#  Signiert wird in der Cloud ueber das in Xcode angemeldete Konto —
+#  kein lokaler Verteilungsschluessel, kein Keychain-Dialog. Voraussetzung
+#  (seit 02.09.): in der Login-Keychain liegt KEIN lokales Apple-Distribution-
+#  Zertifikat mit privatem Schluessel, sonst greift Xcode dorthin und fragt.
 # ============================================================
 set -uo pipefail
 cd "$(dirname "$0")"
@@ -18,8 +18,10 @@ ARCHIVE="$(ls -dt build/pbmedia-release/FRIDAY-Vault-*.xcarchive 2>/dev/null | h
 if [[ -z "$ARCHIVE" ]]; then
   echo "ABBRUCH: kein Archiv unter build/pbmedia-release/. Zuerst archivieren:"
   echo "  xcodebuild archive -workspace Bitwarden.xcworkspace -scheme Bitwarden -configuration Release \\"
-  echo "    -destination 'generic/platform=iOS' -archivePath build/pbmedia-release/FRIDAY-Vault-1.1.0-2026090201.xcarchive \\"
+  echo "    -destination 'generic/platform=iOS' -archivePath build/pbmedia-release/FRIDAY-Vault-<version>-<build>.xcarchive \\"
+  echo "    -derivedDataPath \"\$HOME/Library/Caches/FRIDAYVaultiOS-Release\" \\"
   echo "    CODE_SIGN_STYLE=Automatic DEVELOPMENT_TEAM=GCPHB9Z9H4 -allowProvisioningUpdates"
+  echo "  (Bauordner NICHT unter Documents — dort bricht Xcode mit 'disk I/O error' ab.)"
   read -n 1 -s -r; exit 1
 fi
 NAME="$(basename "$ARCHIVE" .xcarchive)"
@@ -28,7 +30,7 @@ echo "Archiv:  $ARCHIVE"
 echo "Export:  $EXPORT"
 echo
 echo "── 1. Export (App-Store-IPA, automatische Signierung) ──"
-echo "   Beim ersten Mal: Keychain-Dialog → „Immer erlauben“."
+echo "   Cloud-Signierung ueber das Xcode-Konto, kein Dialog."
 rm -rf "$EXPORT"
 if ! xcodebuild -exportArchive -archivePath "$ARCHIVE" -exportPath "$EXPORT" \
      -exportOptionsPlist Configs/ExportOptions-PBMedia-AppStore-Automatic.plist -allowProvisioningUpdates; then

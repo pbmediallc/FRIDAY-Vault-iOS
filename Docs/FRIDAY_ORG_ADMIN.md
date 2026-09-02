@@ -30,16 +30,20 @@ Gruppen · Berichte · Richtlinien · Einstellungen — in der Formsprache der L
 - Simulator-Bau nur signiert starten; unsigniert fehlen die Entitlements und die App
   beendet sich beim Keychain-Zugriff.
 
-## TestFlight
-- App-Datensatz `com.pbmedia.fridayvault.ios` (ASC-ID 6805077297) existiert.
-- Die App-Store-Profile vom 31.07. hängen an einem Zertifikat ohne privaten Schlüssel
-  (gesperrte Keychain). Nur `Apple Distribution: PB Media LLC` vom 29.08. (6322C9…) hat
-  einen — deshalb automatische Signierung:
-  `xcodebuild archive … CODE_SIGN_STYLE=Automatic DEVELOPMENT_TEAM=GCPHB9Z9H4 -allowProvisioningUpdates`
-  (Archiv 1.1.0 / 2026090201 liegt unter `build/pbmedia-release/`).
-- Der Export signiert mit diesem Schlüssel und verlangt aus der Kommandozeile EINMAL den
-  Keychain-Dialog „Immer erlauben" (belegt per `codesign --sign 6322…` → SecurityAgent;
-  der Entwicklerschlüssel fragt nicht). Danach: `TESTFLIGHT-HOCHLADEN.command` — Export,
-  Prüfung, `altool --upload-app` mit Schlüssel 7NL8XN2Y2T.
-- Offen laut `PBMEDIA_APP_STORE_RELEASE.md`: GPL-Quelltext des exakten Builds
-  veröffentlichen, Exportkonformität in App Store Connect beantworten.
+## TestFlight — so ging es am 02.09.2026 (Build 1.1.0 / 2026090201)
+- App-Datensatz `com.pbmedia.fridayvault.ios` (ASC-ID 6805077297). Vorher drei Builds (25./26.08.).
+- **Signierung:** Cloud-Signierung über das in Xcode angemeldete Konto (Zertifikat vom 13.08.,
+  ohne lokalen Schlüssel). Dafür musste das lokale Zertifikat vom 29.08. aus der Login-Keychain —
+  Patrick hat es selbst entfernt (`security delete-certificate -Z 6322C9…`). Solange ein lokales
+  Apple-Distribution-Zertifikat mit privatem Schlüssel in der Keychain liegt, wählt Xcode es und
+  verlangt aus der Kommandozeile einen Keychain-Dialog. Der ASC-Schlüssel 7NL8XN2Y2T darf keine
+  Profile anlegen (403) — Cloud-Signierung über den Schlüssel geht deshalb nicht.
+- **Archiv:** `xcodebuild archive … CODE_SIGN_STYLE=Automatic DEVELOPMENT_TEAM=GCPHB9Z9H4
+  -allowProvisioningUpdates -derivedDataPath ~/Library/Caches/FRIDAYVaultiOS-Release`.
+  Bauordner nicht unter Documents (synchronisiert): dort `disk I/O error` in der build.db.
+- **Export:** `Configs/ExportOptions-PBMedia-AppStore-Automatic.plist` (app-store-connect, automatic).
+- **Upload:** `xcrun altool --upload-app … --apiKey 7NL8XN2Y2T --apiIssuer 46b9f7df-…`.
+- **Exportkonformität:** Apple lehnte den ersten Upload ab (90592, kein Code in der Info.plist).
+  Alle bisherigen Builds liefen mit `ITSAppUsesNonExemptEncryption = false`; darauf zurückgestellt.
+- `TESTFLIGHT-HOCHLADEN.command` bündelt Export, Prüfung und Upload für das jüngste Archiv.
+- Offen laut `PBMEDIA_APP_STORE_RELEASE.md`: GPL-Quelltext des exakten Builds veröffentlichen.
